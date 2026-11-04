@@ -1,0 +1,9 @@
+description: "lxst: the LXST voice session on spangap — LXST frames, msgpack, capture/encode/batch, per-speaker jitter, decode, mix and talk keys."
+url: https://github.com/reticulous/lxst
+version: "0.1.0"
+license: "Apache-2.0"
+targets:
+  - esp32s3
+dependencies:
+  idf:
+    version: ">=5.5"

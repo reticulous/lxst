@@ -1,0 +1,19 @@
+{
+  "name": "lxst",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-side LXST: this browser as the voice session's microphone and speaker, and the Phone window, all read from the device's storage.",
+  "license": "Apache-2.0",
+  "exports": {
+    "./modules/*": "./src/modules/*.ts",
+    "./panels/*.vue": "./src/panels/*.vue",
+    "./lib/*": "./src/lib/*.ts"
+  },
+  "peerDependencies": {
+    "vue": "^3.5.0",
+    "quasar": "^2.17.0",
+    "pinia": "^3.0.4",
+    "spangap-browser": "*",
+    "rns": "*"
+  }
+}

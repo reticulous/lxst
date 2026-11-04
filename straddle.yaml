@@ -1,0 +1,95 @@
+# lxst — the LXST voice session on spangap.
+#
+# LXST (Lightweight Extensible Signal Transport) is Reticulum's real-time audio
+# layer. This straddle carries what every LXST-borne voice protocol shares: the
+# LXST frame (codec byte + Opus or Codec2 payload), a small msgpack
+# reader/writer, and the voice session — capture, encode, batch, per-speaker
+# jitter, decode, mix, transmit gating and the talk keys. The device has one
+# microphone and one speaker, so the lxst task owns the one session and a
+# protocol task (partyline) opens it over ITS. Codecs come from spangap/audio.
+schema_version: 1
+name: reticulous/lxst
+prefix: lxst
+version: 0.1.0
+firmware: esp-idf
+browser: browser
+platforms: [idf]
+requires:
+  - reticulous/rns
+  - spangap/audio
+services:
+  - { class: LxstService, header: lxst.h }
+  - { class: LxstPhoneService, header: lxst_phone.h }
+  - { class: LxstPhoneApp, header: lxst_phone_app.h, when: spangap/spangap-lcd }
+
+browser_register:
+  - call: registerPhone
+    module: modules/phone
+
+settings:
+  - at:
+      - { id: reticulum }
+      - { id: voice, label: "Voice", order: 9 }
+    rows:
+      - section: "Voice"
+      - caption: "How this device talks in voice rooms. Calls transmit by their own mode: continuously in full duplex, while a talk key is held in half duplex."
+      - dropdown:
+          label: "Transmit"
+          key: "s.lxst.tx"
+          options:
+            - { v: "ptt", l: "While a talk key is held" }
+            - { v: "vox", l: "When the microphone hears a voice" }
+            - { v: "open", l: "Always (open microphone)" }
+      - caption: "Talk keys: the keyboard's Mic key, Space on the voice-room screen, or the talk button in the app."
+      - integer: { label: "Voice gate", unit: "dBFS", key: "s.lxst.vox_db", min: -80, max: 0 }
+      - caption: "Voice-activated transmit opens above this level."
+      - integer: { label: "Receive buffer", unit: "ms", key: "s.lxst.jitter_ms", min: 20, max: 3000, step: 20 }
+      - caption: "Audio held back before a speaker plays, in rooms that send every frame on its own. Push-to-talk rooms set their own."
+  - at:
+      - { id: reticulum }
+      - { id: phone, label: "Phone", order: 9 }
+    rows:
+      - section: "Phone"
+      - caption: "Calls with LXST phones such as Sideband. The Phone app is where you call and answer."
+      - switch: { label: "Take calls", key: "s.lxst.phone.enabled" }
+      - caption: "Off, this device is not announced as a phone and takes no calls. Calling out still works."
+      - dropdown:
+          label: "Phone identity"
+          key: "s.lxst.phone.identity"
+          options:
+            - { v: "", l: "Automatic" }
+            - { v: "node", l: "This node's own identity" }
+            - { v: "0", l: "LXMF identity 0" }
+            - { v: "1", l: "LXMF identity 1" }
+            - { v: "2", l: "LXMF identity 2" }
+            - { v: "3", l: "LXMF identity 3" }
+            - { v: "4", l: "LXMF identity 4" }
+            - { v: "5", l: "LXMF identity 5" }
+            - { v: "6", l: "LXMF identity 6" }
+            - { v: "7", l: "LXMF identity 7" }
+            - { v: "8", l: "LXMF identity 8" }
+            - { v: "9", l: "LXMF identity 9" }
+      - caption: "Who callers reach, and who you call as. Automatic is the first LXMF identity, or this node's own when there is none."
+      - value: { label: "Phone address", key: "lxst.phone.dest", copyable: true }
+      - dropdown:
+          label: "Who may call"
+          key: "s.lxst.phone.allow"
+          options:
+            - { v: "all", l: "Anyone" }
+            - { v: "contacts", l: "LXMF contacts only" }
+            - { v: "none", l: "Nobody" }
+      - text: { label: "Blocked", key: "s.lxst.phone.blocked", placeholder: "identity hashes, separated by spaces" }
+      - caption: "A blocked caller always hears busy, whoever else may call."
+      - dropdown:
+          label: "Call quality"
+          key: "s.lxst.phone.profile"
+          options:
+            - { v: "auto", l: "Automatic" }
+            - { v: "ulbw", l: "Ultra-low bandwidth (Codec2 700C)" }
+            - { v: "vlbw", l: "Very low bandwidth (Codec2 1600)" }
+            - { v: "lbw", l: "Low bandwidth (Codec2 3200)" }
+            - { v: "mq", l: "Medium quality (Opus 8 kbit/s)" }
+            - { v: "hq", l: "High quality (Opus 16 kbit/s)" }
+            - { v: "shq", l: "Super-high quality (Opus 32 kbit/s)" }
+            - { v: "ll", l: "Low latency (Opus, 20 ms)" }
+      - caption: "For calls you make. Automatic takes Codec2 700C when the first hop is LoRa or the round trip passes 4 s, Codec2 3200 past 1.5 s, and Opus otherwise. A call you receive uses the caller's choice."
