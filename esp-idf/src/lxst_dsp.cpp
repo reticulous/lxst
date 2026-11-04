@@ -4,12 +4,16 @@
 
 namespace lxsess {
 
-float blockDbfs(const int16_t* pcm, int n)
+float blockRms(const int16_t* pcm, int n)
 {
-    if (n <= 0) return -120.0f;
+    if (n <= 0) return 0.0f;
     int64_t acc = 0;
     for (int i = 0; i < n; i++) acc += (int32_t)pcm[i] * pcm[i];
-    double rms = std::sqrt((double)acc / n) / 32768.0;
+    return (float)(std::sqrt((double)acc / n) / 32768.0);
+}
+
+float rmsDbfs(float rms)
+{
     if (rms <= 0) return -120.0f;
     float db = (float)(20.0 * std::log10(rms));
     return db < -120.0f ? -120.0f : db;

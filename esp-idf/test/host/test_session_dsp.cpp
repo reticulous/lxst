@@ -104,6 +104,10 @@ int main()
     CHECK(blockDbfs(z.data(), 320) == -120.0f);
     std::vector<int16_t> fs(320, 32767);
     CHECK(std::fabs(blockDbfs(fs.data(), 320)) < 0.01f);
+    CHECK(blockRms(z.data(), 320) == 0.0f);
+    CHECK(std::fabs(blockRms(fs.data(), 320) - 1.0f) < 0.001f);
+    std::vector<int16_t> q(320, 8192);
+    CHECK(std::fabs(blockRms(q.data(), 320) - 0.25f) < 0.001f);   /* the meter's full scale */
 
     /* The tone: about −12 dBFS peak, continuous across blocks, and the analysis
      * finds its frequency and level. */

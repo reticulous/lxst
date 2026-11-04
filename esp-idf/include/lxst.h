@@ -197,6 +197,11 @@ enum : uint8_t {
 /** The speaker id LXST_EV_SPEAKING uses for our own transmitter. */
 constexpr uint32_t LXST_SPEAKER_SELF = 0xFFFFFFFFu;
 
+/** Our own microphone level while a talk spurt is being sent, 0–100 (the
+ *  block's linear RMS ×4, clipped, as the browser's meter shows it); 0 when not
+ *  sending. Updated per audio block, safe to read from any task, never stored. */
+int lxstMicLevel();
+
 /** Bring-up service: seeds s.lxst.* defaults, registers the CLI, spawns the
  *  lxst task. */
 class LxstService : public Service {

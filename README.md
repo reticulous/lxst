@@ -70,6 +70,13 @@ is muted. In `ptt` the transmitter keeps running for max(250 ms, frame
 duration + 100 ms) after the key is released, so the last syllable is not
 cut, then flushes the partial batch and marks end-of-talk.
 
+**Microphone level.** While a spurt is being sent, `lxstMicLevel()` (in
+`lxst.h`) gives the level of the latest microphone block, 0–100: its
+root-mean-square level ×4, clipped, the scale the browser's meter uses; it
+reads 0 between spurts. It is a plain atomic, never stored, so a UI polls it.
+The talk bars of the Phone and Partyline LCD apps draw it as a strip along
+their foot while talking, and `lxst` prints it.
+
 **Talk keys.** The board's held talk key (on the T-Deck, its Mic key) keys the
 session whenever one is open. The held Space key does too, while an app has
 claimed it (the Partyline room screen does when no text field has focus). The
@@ -344,7 +351,7 @@ Commands (written by others, read by lxst):
 ## CLI
 
 ```
-lxst                     session (and whether a room is held), endpoint, profile, transmit mode and stats
+lxst                     session (and whether a room is held), endpoint, profile, transmit mode, microphone level and stats
 lxst tone <hz>|off       transmit a test tone instead of the microphone
 lxst ptt 1|0             hold / release the device talk key
 

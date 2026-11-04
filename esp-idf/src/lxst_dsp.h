@@ -10,8 +10,14 @@
 
 namespace lxsess {
 
-/** Root-mean-square (RMS) level of a PCM16 block in dB relative to full scale (−120 for silence). */
-float blockDbfs(const int16_t* pcm, int n);
+/** Root-mean-square (RMS) level of a PCM16 block, linear, 0 (silence) to 1 (full scale). */
+float blockRms(const int16_t* pcm, int n);
+
+/** A linear RMS level in dB relative to full scale (−120 for silence). */
+float rmsDbfs(float rms);
+
+/** RMS level of a PCM16 block in dB relative to full scale (−120 for silence). */
+inline float blockDbfs(const int16_t* pcm, int n) { return rmsDbfs(blockRms(pcm, n)); }
 
 /** Sine source at about −12 dBFS peak. */
 struct Tone {

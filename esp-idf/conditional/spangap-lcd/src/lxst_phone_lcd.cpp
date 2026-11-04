@@ -16,7 +16,8 @@
  *     a pulsing handset, Reject and Answer. Dialling, ring-back, connecting:
  *     the status line and Cancel. Live: the peer, the timer, the profile and
  *     mode, Mute and Hang up, and in half duplex a hold-to-talk bar that
- *     writes lxst.cmd.ptt 1/0 (the board's talk key works everywhere; Space
+ *     shows the microphone level (lxstMicLevel()) along its foot while
+ *     talking and writes lxst.cmd.ptt 1/0 (the board's talk key works everywhere; Space
  *     is claimed here while no text field has focus). Ended: the status for
  *     the phone's three seconds, then home.
  *
@@ -37,6 +38,7 @@
 #include "lcd.h"
 #include "lcd_app.h"
 #include "lcd_keys.h"
+#include "lxst.h"
 #include "lxst_phone_app.h"
 #include "storage.h"
 #include "esp_timer.h"
@@ -77,6 +79,7 @@ const uint32_t C_FAIL    = 0xE06060;   /* missed calls */
 const uint32_t C_DIALOG  = 0x20262E;   /* toast */
 const uint32_t C_TALKRDY = 0x172331;   /* talk bar, ready */
 const uint32_t C_TALKDN  = 0x1D4F80;   /* talk bar, held before the session keys */
+const uint32_t C_LEVEL   = 0x9FE0B0;   /* the microphone level along the talk bar's foot */
 const uint32_t C_RINGBG  = 0x173A24;   /* the call banner while ringing */
 
 const lv_font_t* kFont      = &lv_font_montserrat_12_latin;
@@ -723,8 +726,10 @@ void refreshHome();
 void refreshCall();
 void pttRelease();
 
+void stopLevel();
+
 void showScreen(Screen sc) {
-    if (g_screen == SC_CALL && sc != SC_CALL) pttRelease();
+    if (g_screen == SC_CALL && sc != SC_CALL) { pttRelease(); stopLevel(); }
     g_screen = sc;
     showIf(s_home, sc == SC_HOME);
     showIf(s_call, sc == SC_CALL);
@@ -1068,6 +1073,8 @@ lv_obj_t* s_cProf = nullptr;
 lv_obj_t* s_talkRow = nullptr;
 lv_obj_t* s_talk = nullptr;
 lv_obj_t* s_talkLbl = nullptr;
+lv_obj_t* s_talkLvl = nullptr;          /* the microphone level along the bar's foot */
+lv_timer_t* g_lvlTimer = nullptr;       /* runs only while talking on the call screen */
 lv_obj_t* s_bReject = nullptr;
 lv_obj_t* s_bAnswer = nullptr;
 lv_obj_t* s_bMute = nullptr;
@@ -1087,13 +1094,37 @@ void pttRelease() {
     storageSet("lxst.cmd.ptt", "0");
 }
 
+/* The level fill: lxstMicLevel() as a share of the bar's inner width, inset
+ * from the rounded corners. */
+void drawLevel() {
+    if (!s_talk || !s_talkLvl) return;
+    int inset = lcdPx(4);
+    int w = lv_obj_get_width(s_talk) - 2 * inset;
+    int fill = w > 0 ? w * lxstMicLevel() / 100 : 0;
+    lv_obj_set_width(s_talkLvl, fill);
+    showIf(s_talkLvl, fill > 0);
+}
+void stopLevel() {
+    if (g_lvlTimer) { lv_timer_delete(g_lvlTimer); g_lvlTimer = nullptr; }
+    showIf(s_talkLvl, false);
+}
+void lvlTimerCb(lv_timer_t*) { drawLevel(); }
+/* The meter runs while we transmit and the call screen is in front. */
+void levelFollow(bool talking) {
+    if (talking && s_layer && g_shown && g_screen == SC_CALL) {
+        if (!g_lvlTimer) { g_lvlTimer = lv_timer_create(lvlTimerCb, 60, nullptr); drawLevel(); }
+    } else {
+        stopLevel();
+    }
+}
+
 /* What the talk bar says and whether holding it talks. */
 void refreshTalk() {
     if (!s_talk || !s_talkLbl) return;
     bool show = phState() == "live" && halfDuplex();
     showIf(s_talkRow, show);
     g_canTalk = false;
-    if (!show) { pttRelease(); return; }
+    if (!show) { pttRelease(); stopLevel(); return; }
     bool talking = storageGetInt("lxst.talking", 0) != 0;
     std::string text;
     uint32_t bg = C_BAR, fg = C_SUB, border = C_RULE;
@@ -1110,6 +1141,7 @@ void refreshTalk() {
         fg = C_ACT; border = C_ACCENT; bg = C_TALKRDY;
         g_canTalk = true;
     }
+    levelFollow(talking && !phMuted());
     if (g_pttHeld && !talking && g_canTalk) bg = C_TALKDN;
     if (!g_canTalk) pttRelease();
     lv_label_set_text(s_talkLbl, text.c_str());
@@ -1248,6 +1280,15 @@ void buildCall() {
     lv_obj_remove_flag(s_talk, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(s_talk, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_ext_click_area(s_talk, lcdPx(4));
+    /* The level fill sits under the label, a thin strip along the bar's foot. */
+    s_talkLvl = lv_obj_create(s_talk);
+    lv_obj_remove_style_all(s_talkLvl);
+    lv_obj_remove_flag(s_talkLvl, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_talkLvl, 0, lcdPx(3));
+    lv_obj_set_style_bg_color(s_talkLvl, lv_color_hex(C_LEVEL), 0);
+    lv_obj_set_style_bg_opa(s_talkLvl, LV_OPA_COVER, 0);
+    lv_obj_align(s_talkLvl, LV_ALIGN_BOTTOM_LEFT, lcdPx(4), -lcdPx(2));
+    lv_obj_add_flag(s_talkLvl, LV_OBJ_FLAG_HIDDEN);
     s_talkLbl = mkLabel(s_talk, "", C_SUB, kBold);
     lv_label_set_long_mode(s_talkLbl, LV_LABEL_LONG_MODE_DOTS);
     lv_obj_set_width(s_talkLbl, lv_pct(96));
@@ -1399,7 +1440,7 @@ void resetHandles() {
     s_toast = s_toastLbl = nullptr;
     g_callHdr = Header{};
     s_cIcon = s_cName = s_cHash = s_cStatus = s_cTimer = s_cProf = nullptr;
-    s_talkRow = s_talk = s_talkLbl = nullptr;
+    s_talkRow = s_talk = s_talkLbl = s_talkLvl = nullptr;
     s_bReject = s_bAnswer = s_bMute = s_bMuteLbl = s_bMuteIcon = s_bHang = s_bHangLbl = nullptr;
     g_callShape.clear();
     g_focusTarget = nullptr;
@@ -1414,6 +1455,7 @@ void deleteTimers() {
     if (g_ringTimer)  { lv_timer_delete(g_ringTimer);  g_ringTimer = nullptr; }
     if (g_iconTimer)  { lv_timer_delete(g_iconTimer);  g_iconTimer = nullptr; }
     if (g_focusTimer) { lv_timer_delete(g_focusTimer); g_focusTimer = nullptr; }
+    if (g_lvlTimer)   { lv_timer_delete(g_lvlTimer);   g_lvlTimer = nullptr; }
 }
 
 void phoneApp(lv_obj_t* root) {
@@ -1506,6 +1548,7 @@ void LxstPhoneApp::onHide()
     g_shown = false;
     if (!s_layer) return;
     pttRelease();
+    stopLevel();
     updateSpaceClaim();
 }
 

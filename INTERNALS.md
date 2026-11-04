@@ -87,7 +87,8 @@ TAIL ── tail fired or gate lost ─────────▶ IDLE        (
 
 The tail is max(250 ms, frame_ms + 100 ms). The voice gate compares each
 microphone block's root-mean-square level with `s.lxst.vox_db` and stays open 400 ms past
-the last block above it. A change of the effective mode or of endpoint owner
+the last block above it. The same per-block level, computed once, sets
+`lxstMicLevel()` while the state is not IDLE; `spurtEnd` zeroes it. A change of the effective mode or of endpoint owner
 ends the spurt in progress.
 
 **The microphone.** The session wants the microphone when it may transmit at

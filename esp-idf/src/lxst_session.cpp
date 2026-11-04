@@ -224,6 +224,7 @@ static uint8_t* s_rx = nullptr;
 static esp_timer_handle_t s_clock = nullptr, s_tail = nullptr;
 static std::atomic<int>   s_ticks{0};
 static std::atomic<bool>  s_tailFired{false};
+static std::atomic<int>   s_micLevel{0};    /* lxstMicLevel(): 0–100 while a spurt is sent */
 static bool     s_clockOn = false;
 
 static Stats    s_st;
@@ -424,6 +425,7 @@ static void spurtEnd(bool send)
     if (s_tail) esp_timer_stop(s_tail);
     s_tailFired.store(false);
     s_tx = TX_IDLE;
+    s_micLevel.store(0, std::memory_order_relaxed);
     s_unitFill = 0;
     s_frameUnits = 0;
     if (send) {
@@ -496,14 +498,17 @@ static void encodeUnit()
 /* Microphone (or test tone) PCM: the voice gate, then the encoder. */
 static void txInput(const int16_t* pcm, int n)
 {
+    float rms = lxsess::blockRms(pcm, n);
     if (s_mode == MODE_VOX) {
         int64_t now = esp_timer_get_time();
-        if (lxsess::blockDbfs(pcm, n) > (float)s_voxDb)
+        if (lxsess::rmsDbfs(rms) > (float)s_voxDb)
             s_voxUntilUs = now + (int64_t)VOX_HANG_MS * 1000;
         bool open = now < s_voxUntilUs;
         if (open != s_voxOpen) { s_voxOpen = open; txEval(); }
     }
     if (s_tx == TX_IDLE || !s_enc || !s_unitBuf) return;
+    float lvl = rms * 4.0f;
+    s_micLevel.store(lvl >= 1.0f ? 100 : (int)(lvl * 100.0f + 0.5f), std::memory_order_relaxed);
     while (n > 0) {
         int take = s_unitSamples - s_unitFill;
         if (take > n) take = n;
@@ -1401,6 +1406,8 @@ static void lxstTask(void*)
     }
 }
 
+int lxstMicLevel() { return s_micLevel.load(std::memory_order_relaxed); }
+
 /* ───────────── CLI ───────────── */
 
 static void cliStat(const char* key)
@@ -1442,8 +1449,8 @@ static void cliLxst(const char* args)
     std::string tx = storageGetStr("lxst.tx_mode", "");
     if (tx.empty()) tx = storageGetStr("s.lxst.tx", "ptt");
     std::string vox = tx == "vox" ? " (vox " + std::to_string(storageGetInt("s.lxst.vox_db", -45)) + " dBFS)" : "";
-    cliPrintf("tx mode   %s%s, talking %d, tone %d Hz\n", tx.c_str(), vox.c_str(),
-              storageGetInt("lxst.talking", 0), storageGetInt("lxst.test_tone", 0));
+    cliPrintf("tx mode   %s%s, talking %d, mic level %d%%, tone %d Hz\n", tx.c_str(), vox.c_str(),
+              storageGetInt("lxst.talking", 0), lxstMicLevel(), storageGetInt("lxst.test_tone", 0));
     cliPrintf("jitter    %d ms when the profile names none\n",
               storageGetInt("s.lxst.jitter_ms", 200));
     cliPrintf("stats\n");
