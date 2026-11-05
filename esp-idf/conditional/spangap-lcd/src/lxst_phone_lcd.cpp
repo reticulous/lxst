@@ -1212,7 +1212,8 @@ void refreshCall() {
     std::string status = printable(storageGetStr("lxst.phone.status", ""));
     if (status.empty()) status = ring ? "Incoming call" : st;
     lv_label_set_text(s_cStatus, status.c_str());
-    lv_obj_set_style_text_color(s_cStatus, lv_color_hex(live ? C_OK : ended ? C_SUB : 0xFFFFFF), 0);
+    bool doubt = live && status != "Connected";
+    lv_obj_set_style_text_color(s_cStatus, lv_color_hex(doubt ? C_AMBER : live ? C_OK : ended ? C_SUB : 0xFFFFFF), 0);
 
     std::string timer = storageGetStr("lxst.phone.timer", "");
     lv_label_set_text(s_cTimer, timer.c_str());

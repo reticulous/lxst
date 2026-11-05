@@ -168,7 +168,14 @@ buffers seconds per speaker, which is why it holds frames.
   arrived for the hold time. Partyline sets `jitter_ms` to the room's
   `ptt_jitter_ms` in a push-to-talk room and its cap `max_jitter_ms` to 30 s;
   in other rooms it sets neither, and the session uses `s.lxst.jitter_ms` and
-  a 3 s cap. Past the cap the oldest slot is dropped.
+  a 3 s cap. Past the cap the oldest slot is dropped. The phone sets both
+  from the call profile (`receiveBuffer`); over a LoRa first hop SUPE
+  delivers a peer's frames in batches of up to `BATCH_FRAMES` (12) after
+  holding them up to `BATCH_WAIT_MS` (3 s), so there the start depth is
+  `BATCH_WAIT_MS` in whole frames and the cap that plus a batch. A smaller
+  buffer evicts most of each batch and its 1 s hold splits every spurt at
+  the gaps between batches (`dropped` counts those evictions: frames that
+  arrived and were thrown away, not frames lost on air).
 - *Release.* The hold time is max(1 s, the start depth). A drained buffer is
   released when the talker sent end-of-talk or nothing has arrived for the
   hold time; otherwise it is an underrun and the buffer fills to its start
@@ -409,6 +416,26 @@ period, so the task watches `rnsd.links.<tag>.state` too: `closed` or
 A live call has no deadline of its own: it ends when its Link closes or
 goes stale (rnsd's keepalive and stale handling), never on silence, since a
 muted or microphone-less peer sends nothing.
+
+**A silent Link.** RNS lets only a Link's initiator send keepalives; the
+responder answers them and otherwise only watches, and an initiator ignores
+an inbound keepalive request. So the callee cannot probe a caller that died,
+and its Link goes stale only after two keepalive intervals, and the interval
+scales with the round trip up to 360 s. rnsd publishes
+`rnsd.links.<tag>.heard_s` (moved by any packet heard, keepalives included)
+and `keepalive_s`/`rtt_ms`; the task stamps its own clock each time
+`heard_s` moves (`Ctx::heardAt`, set at the call's start too). From that:
+- after `SILENT_WARN_MS` (90 s) of silence the live status line becomes
+  "Connection may be lost (nothing heard for m:ss)", republished with the
+  timer each second and reset by the next packet heard;
+- an identified, allowed caller arriving while a live or connecting call's
+  Link has been silent past `deadAfterMs(keepalive_s, rtt_ms)` (one
+  interval + max(15 s, 4 RTT), at least 90 s, 360 s for an unknown
+  interval) ends that call "Connection lost" and rings. A live peer is heard
+  at least once per interval: a Python RNS initiator's watchdog wakes at most
+  every 5 s and sends after one interval without sending, and a responder
+  answers ours. One lost keepalive can therefore let a new caller pre-empt a
+  muted call; the Link itself would go stale at the next one.
 
 **Identity.** The identity is chosen as partyline chooses (the only LXMF
 identity, the user's choice when there are several, the node's own when

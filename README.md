@@ -173,7 +173,13 @@ of any identity on the node) or `none`. `s.lxst.phone.blocked` lists identity
 hashes that are always refused, whatever `allow` says. Every new link hears
 AVAILABLE, even while a call is up, so the caller identifies; a caller that is
 blocked, not allowed, or finds a call up then hears BUSY and the link is torn
-down.
+down. The exception is a call up whose Link has heard nothing at all,
+keepalives included, for longer than one keepalive interval plus max(15 s,
+4 × round trip), and never less than 90 s: that call is taken as dead, ends
+"Connection lost", and the new caller rings as usual. A live peer is heard at
+least once per keepalive interval, while the Link's own stale timer waits two
+intervals and a grace, up to about 12 minutes on a slow path, and the callee
+side of a Link cannot probe its caller.
 
 **Profiles.** The profile names the codec and frame time each side transmits.
 The receiver decodes whatever codec and Codec2 mode each frame carries; the
@@ -234,6 +240,15 @@ republished by the interface at least every 10 s while it transmits and the
 radio spends at most 1 s of airtime per second, so the reserve keeps the
 hour's actual airtime within the limit.
 
+**Receive buffering.** A call's receive buffer follows its profile: playback
+starts a frame or two in and the buffer holds a few frames more. Over a LoRa
+first hop frames arrive in batches (SUPE hands a peer's frames up together
+when an exchange closes, up to 12 at once, and a sender holds a packet up to
+3 s for its exchange), so there playback starts 3 s in (whole frames: 3.2 s
+for 700C), a talk spurt rides out a gap of that long between batches, and
+the buffer holds a whole batch on top. The profile is resent to the session
+when the hop changes between LoRa and anything else mid-call.
+
 | Profile | Packet | Every | Transmit |
 |---|---|---|---|
 | `0x10` Codec2 700C | 115 B | 400 ms | 2300 bit/s |
@@ -253,7 +268,10 @@ talk. Full duplex at `0x10` needs a hop of 7667 bit/s.
 only carries half, and follows a peer's mode. Full duplex transmits whenever the microphone gives audio and the
 call is not muted; half duplex only while a talk key is held. A muted or
 microphone-less end sends nothing. A call ends when its Link closes or goes
-stale, never on silence.
+stale, never on silence. Once the Link has heard nothing for 90 s the status
+line reads "Connection may be lost (nothing heard for m:ss)", on the LCD and
+in the browser, so the user can hang up; anything heard puts it back to
+"Connected".
 
 **Tones.** The session plays them on whichever endpoint owns it, mixed over any
 room audio: the ring for an incoming call (400 Hz and 450 Hz together, 0.4 s
@@ -300,7 +318,7 @@ RAM:
 |---|---|
 | `lxst.phone.state` | `off` (disabled or no identity) · `idle` · `dialling` · `ringback` (the callee rings) · `ringing` (an incoming call) · `connecting` · `live` · `ended` (3 s after a call, then `idle`) |
 | `lxst.phone.{dir,peer,peer_dest,peer_name}` | The current or last call: `in` · `out`, the remote identity hash, its `lxst.telephony` destination, its display name. |
-| `lxst.phone.status` | One finished line for the Phone app and window ("Calling Alice…", "Incoming call", "Connected", "Busy" …); while `ended`, why the call ended, such as "Route too slow for a call", "Airtime limit reached" or "Connection lost" (the link went stale). Both call screens show it. |
+| `lxst.phone.status` | One finished line for the Phone app and window ("Calling Alice…", "Incoming call", "Connected", "Busy" …); while `ended`, why the call ended, such as "Route too slow for a call", "Airtime limit reached" or "Connection lost" (the link went stale, or was silent past its bound when a new call came in). While live, "Connection may be lost (nothing heard for m:ss)" after 90 s with nothing heard on the link. Both call screens show it. |
 | `lxst.phone.timer` | "m:ss" since the call went live, each second; "" otherwise. |
 | `lxst.phone.muted` | 1 while our microphone is muted for the call. |
 | `lxst.phone.profile`, `lxst.phone.mode` | The call's profile ("Opus medium, 60 ms") and `full duplex` · `half duplex`; "" with no call. |

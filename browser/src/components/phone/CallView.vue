@@ -11,7 +11,7 @@
       <div v-if="hash" class="hs" :title="hash">{{ groupHash(hash) }}</div>
     </div>
 
-    <div class="st">{{ call.status }}</div>
+    <div class="st" :class="{ doubt: call.state === 'live' && call.status !== 'Connected' }">{{ call.status }}</div>
     <div v-if="call.state === 'live'" class="tm">{{ call.timer }}</div>
     <div v-if="call.state === 'live' && (call.profile || call.mode)" class="pm">
       {{ [call.profile, call.mode].filter(Boolean).join(' · ') }}
@@ -109,6 +109,7 @@ onBeforeUnmount(up)
 .nm.anon { font-weight: 400; font-style: italic; color: #cfcfcf; }
 .hs { font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: calc(11.5px * var(--rfs, 1)); color: #9a9a9a; }
 .st { color: #b8c8e8; margin-top: 6px; }
+.st.doubt { color: #e8a33a; }
 .tm { font-size: calc(26px * var(--rfs, 1)); font-variant-numeric: tabular-nums; font-weight: 300; }
 .pm { color: #9a9a9a; font-size: calc(11.5px * var(--rfs, 1)); }
 .btns { display: flex; gap: 26px; margin: 14px 0 6px; }

@@ -82,6 +82,22 @@ constexpr int32_t BUSY_TONE_MS = 4000;
  * link goes. */
 constexpr int32_t SIGNAL_GRACE_MS = 1000;
 
+/* A live call whose link has heard nothing (keepalives included) for this long
+ * shows "Connection may be lost" with the time since, so the user can hang
+ * up. Silence alone never ends a call: a muted or microphone-less end sends
+ * no frames. */
+constexpr int64_t SILENT_WARN_MS = 90000;
+
+/** How long a live call's link may hear nothing before a new incoming call
+ *  takes its place, the old one ending "Connection lost". A live peer is
+ *  heard at least once per keepalive interval (an initiator sends one after
+ *  that long without sending, a responder answers ours), so one interval
+ *  plus max(15 s, 4 RTT) for a late packet, never under SILENT_WARN_MS.
+ *  keepaliveS 0 (not known yet) counts as the RNS maximum, 360 s. A
+ *  responder cannot probe its initiator, and the link's own stale timer
+ *  waits two intervals and a grace (up to ~12 min on a slow path). */
+int64_t deadAfterMs(int keepaliveS, int rttMs);
+
 class Call {
 public:
     Dir      dir = DIR_OUT;

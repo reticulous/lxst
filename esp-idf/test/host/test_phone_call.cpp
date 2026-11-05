@@ -382,8 +382,21 @@ static void hopFit()
     CHECK(!f.fail(200));
 }
 
+/* How long a call's link may hear nothing before a new call takes its place. */
+static void deadBound()
+{
+    CHECK(deadAfterMs(360, 2000) == 360000 + 15000);   /* the 12-min stale case: 375 s */
+    CHECK(deadAfterMs(360, 8000) == 360000 + 32000);   /* 4 RTT past 15 s */
+    CHECK(deadAfterMs(0, 0) == 375000);                /* unknown: the RNS maximum */
+    CHECK(deadAfterMs(5, 30) == SILENT_WARN_MS);       /* never under the warning */
+    CHECK(deadAfterMs(60, 250) == SILENT_WARN_MS);
+    CHECK(deadAfterMs(103, 500) == 118000);
+    CHECK(deadAfterMs(-1, -5) == 375000);
+}
+
 int main()
 {
+    deadBound();
     hopFit();
     noUll();
     callerHappy();

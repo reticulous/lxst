@@ -26,6 +26,15 @@ Result refusedResult(bool callUp, bool allowed)
     return callUp && allowed ? R_MISSED : R_NONE;
 }
 
+int64_t deadAfterMs(int keepaliveS, int rttMs)
+{
+    int64_t ka = keepaliveS > 0 ? keepaliveS : 360;
+    int64_t slack = 4LL * (rttMs > 0 ? rttMs : 0);
+    if (slack < 15000) slack = 15000;
+    int64_t t = ka * 1000 + slack;
+    return t > SILENT_WARN_MS ? t : SILENT_WARN_MS;
+}
+
 void Call::push(const Act& a)
 {
     if (nActs < MAX_ACTS) acts[nActs++] = a;

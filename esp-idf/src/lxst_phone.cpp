@@ -238,6 +238,9 @@ struct Ctx {
     bool        resolving = false;
     int64_t     resolveAt = 0, askAt = 0;
     const char* why = "";           /* a failure's reason, for the status line */
+    int64_t     heardAt = 0;        /* when the call's link last heard its peer: the
+                                       call's start, then each move of
+                                       rnsd.links.<tag>.heard_s */
 };
 
 struct Pending { int h = -1; char tag[24] = {}; int64_t idBy = 0; bool fresh = false; std::string rid; };
@@ -311,6 +314,16 @@ static void dyingRun(int64_t now)
 
 /* ─────────────── the session's call port ─────────────── */
 
+/* The session's receive buffer was last sized for a batched (LoRa) first hop
+ * (receiveBuffer); hopCheck resends the profile when the hop flips. */
+static bool s_batched = false;
+
+static bool batchedHop()
+{
+    return !s_ctx->tag.empty() &&
+        storageGetStr(("rnsd.links." + s_ctx->tag + ".iface").c_str(), "").rfind("lora/", 0) == 0;
+}
+
 static void lxProfile(uint8_t prof, uint8_t mode, lxst_profile_t& lp)
 {
     const ProfileInfo* p = profileInfo(prof);
@@ -325,7 +338,8 @@ static void lxProfile(uint8_t prof, uint8_t mode, lxst_profile_t& lp)
     lp.batch_per_frame = 0;
     lp.batch_max_frames = (uint8_t)framesPerPacket(*p);
     uint16_t j, m;
-    receiveBuffer(*p, j, m);
+    s_batched = batchedHop();
+    receiveBuffer(*p, j, m, s_batched);
     lp.jitter_ms = j;
     lp.max_jitter_ms = m;
     lp.sequenced = 0;
@@ -406,6 +420,17 @@ static bool lxOpen(uint32_t arg)
     return true;
 }
 
+static void lxSendProfile(uint8_t prof, uint8_t mode)
+{
+    if (s_lx < 0) return;
+    uint8_t m[1 + sizeof(lxst_profile_t)];
+    lxst_profile_t lp;
+    lxProfile(prof, mode, lp);
+    m[0] = LXST_OP_PROFILE;
+    std::memcpy(m + 1, &lp, sizeof lp);
+    itsSend(s_lx, m, sizeof m, 0);
+}
+
 /* Received frames gather in one OP_FRAMES across a receive callback's drain,
  * and go to the session when it ends, when a signal needs acting on, or when
  * the message is full: one session message per wake, not one per packet. */
@@ -467,6 +492,22 @@ static const char* endText(Result r)
     }
 }
 
+static int64_t silentMs(int64_t now)
+{
+    return s_ctx->heardAt > 0 ? now - s_ctx->heardAt : 0;
+}
+
+static std::string s_liveStatus;   /* lxst.phone.status as last published while live */
+
+/* A live call's status line: "Connected", or after SILENT_WARN_MS of link
+ * silence the warning with the time since the link last heard anything. */
+static std::string liveStatus(int64_t now)
+{
+    int64_t s = silentMs(now);
+    if (s < SILENT_WARN_MS) return "Connected";
+    return "Connection may be lost (nothing heard for " + durationText(s / 1000) + ")";
+}
+
 static void publish()
 {
     int64_t now = nowMs();
@@ -478,7 +519,7 @@ static void publish()
     case PH_RINGBACK:   state = "ringback";   status = "Ringing" ELLIPSIS; break;
     case PH_RINGING:    state = "ringing";    status = "Incoming call"; break;
     case PH_CONNECTING: state = "connecting"; status = "Connecting" ELLIPSIS; break;
-    case PH_LIVE:       state = "live";       status = "Connected"; break;
+    case PH_LIVE:       state = "live";       status = s_liveStatus = liveStatus(now); break;
     case PH_BUSYTONE:   state = "ended";      status = endText(s_call->result); break;
     default:
         if (now < s_endedUntil) { state = "ended"; status = s_endStatus; }
@@ -513,7 +554,14 @@ static void publishTimer(int64_t now)
     if (s_call->ph != PH_LIVE || s_call->liveAt < 0) return;
     if (now < s_timerAt) return;
     int64_t secs = (now - s_call->liveAt) / 1000;
+    std::string st = liveStatus(now);
+    storageBegin();
     storageSet("lxst.phone.timer", durationText(secs).c_str());
+    if (st != s_liveStatus) {
+        s_liveStatus = st;
+        storageSet("lxst.phone.status", st.c_str());
+    }
+    storageEnd();
     s_timerAt = s_call->liveAt + (secs + 1) * 1000;
 }
 
@@ -596,16 +644,9 @@ static bool doAct(const Act& a, int64_t now)
             return false;
         }
         break;
-    case A_PROFILE: {
-        if (s_lx < 0) break;
-        uint8_t m[1 + sizeof(lxst_profile_t)];
-        lxst_profile_t lp;
-        lxProfile((uint8_t)a.arg, (uint8_t)(a.arg >> 8), lp);
-        m[0] = LXST_OP_PROFILE;
-        std::memcpy(m + 1, &lp, sizeof lp);
-        itsSend(s_lx, m, sizeof m, 0);
+    case A_PROFILE:
+        lxSendProfile((uint8_t)a.arg, (uint8_t)(a.arg >> 8));
         break;
-    }
     case A_TONE:
         lxOp(LXST_OP_TONE, (int)a.arg);
         break;
@@ -728,6 +769,8 @@ static void hopCheck(int64_t now)
         s_call->setProfile(f.profile, f.mode);
         if (s_call->hopWant == f.profile) s_call->hopWant = 0;
         pi = to;
+    } else if (s_lx >= 0 && batchedHop() != s_batched) {
+        lxSendProfile(s_call->profile, s_call->mode);
     }
     int64_t left = talkSecondsLeft(*pi, bps, used, lim);
     if (left < 0) return;
@@ -839,6 +882,24 @@ static void pendingIdentified(int i, std::string identHex)
     bool allowed = callerAllowed(identHex);
     uint8_t ih[16], td[16];
     hexTo(identHex, ih, 16);
+    /* A call up whose link has heard nothing past deadAfterMs is taken as
+     * dead: it ends "Connection lost" and this caller is let in. */
+    if (allowed && (s_call->ph == PH_LIVE || s_call->ph == PH_CONNECTING)) {
+        std::string lk = "rnsd.links." + s_ctx->tag + ".";
+        int ka = storageGetInt((lk + "keepalive_s").c_str(), 0);
+        int rtt = storageGetInt((lk + "rtt_ms").c_str(), 0);
+        int64_t silent = silentMs(now), dead = deadAfterMs(ka, rtt);
+        if (silent > dead) {
+            info("lxphone: call link %s heard nothing for %lld s (keepalive %d s, rtt %d ms, bound %lld s): "
+                 "ending it as lost for the new call",
+                 s_ctx->tag.c_str(), (long long)(silent / 1000), ka, rtt, (long long)(dead / 1000));
+            s_ctx->why = "Connection lost";
+            if (s_ctx->link >= 0) itsDisconnect(s_ctx->link);
+            s_ctx->link = -1;
+            s_call->linkClosed(now);
+            runActs();
+        }
+    }
     if (s_call->ph != PH_NONE || !allowed) {
         info("lxphone: %s refused (%s)", identHex.c_str(), allowed ? "a call is up" : "not allowed");
         Result r = refusedResult(s_call->ph != PH_NONE, allowed);
@@ -855,6 +916,7 @@ static void pendingIdentified(int i, std::string identHex)
     s_ctx->peerDest = rnsdDestinationHashFromIdentityHash(ih, "lxst", "telephony", td) ? hexOf(td, 16) : "";
     s_ctx->peerName = nameFor(ih);
     s_ctx->at = wallS();
+    s_ctx->heardAt = now;
     s_muted = false;
     info("lxphone: incoming call from %s", identHex.c_str());
     s_call->ring(now);
@@ -892,6 +954,14 @@ static void noteLinkLoss(const std::string& tag)
         s_ctx->why = "Connection lost";
 }
 
+/* rnsd.links.<tag>.heard_s of the call's link moved: its peer was heard. */
+static void heardNow()
+{
+    int64_t now = nowMs();
+    s_ctx->heardAt = now;
+    if (s_call->ph == PH_LIVE && s_liveStatus != liveStatus(now)) publish();
+}
+
 static void inLinkGone(const std::string& t)
 {
     for (int i = 0; i < PH_PENDING; ++i)
@@ -916,6 +986,10 @@ static void onInLinkKey(const char* key, const char*)
     const char* dot = std::strrchr(tag, '.');
     if (!dot) return;
     std::string t(tag, dot - tag);
+    if (!std::strcmp(dot, ".heard_s")) {
+        if (s_ctx->inbound && s_ctx->tag == t) heardNow();
+        return;
+    }
     if (s_ctx->inbound && hopKey(key)) {
         hopCheck(nowMs());
         runActs();
@@ -941,6 +1015,10 @@ static void onInLinkKey(const char* key, const char*)
 static void onOutLinkKey(const char* key, const char* val)
 {
     if (s_ctx->tag.empty() || s_ctx->inbound || !val) return;
+    if (("rnsd.links." + s_ctx->tag + ".heard_s") == key) {
+        heardNow();
+        return;
+    }
     if (hopKey(key)) {
         hopCheck(nowMs());
         runActs();
@@ -987,6 +1065,7 @@ static void openLink(const uint8_t tel[16], const uint8_t ih[16])
         return;
     }
     s_ctx->link = h;
+    s_ctx->heardAt = nowMs();
     rnsdLinkExpectProofs(s_ctx->tag.c_str(), false);
     info("lxphone: calling %s (%s)", s_ctx->peerDest.c_str(), s_ctx->peerIdent.c_str());
     publish();

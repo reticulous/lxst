@@ -417,12 +417,18 @@ CallFit autoProfile(uint32_t hopBps, int rtt_ms)
     return fitCall(want, hopBps, true);
 }
 
-void receiveBuffer(const ProfileInfo& p, uint16_t& jitter_ms, uint16_t& max_jitter_ms)
+void receiveBuffer(const ProfileInfo& p, uint16_t& jitter_ms, uint16_t& max_jitter_ms, bool batchedHop)
 {
     int start = p.buffer > 3 ? p.buffer - 2 : 1;
     int j = p.frame_ms * start;
     if (j < JITTER_FLOOR_MS) j = JITTER_FLOOR_MS;
     int m = p.frame_ms * (p.buffer + 1) + JITTER_MARGIN_MS;
+    if (batchedHop && p.frame_ms > 0) {
+        int b = (BATCH_WAIT_MS + p.frame_ms - 1) / p.frame_ms * p.frame_ms;
+        if (j < b) j = b;
+        int bm = j + p.frame_ms * BATCH_FRAMES + JITTER_MARGIN_MS;
+        if (m < bm) m = bm;
+    }
     if (m < j) m = j;
     jitter_ms = (uint16_t)j;
     max_jitter_ms = (uint16_t)m;

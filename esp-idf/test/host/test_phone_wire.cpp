@@ -103,6 +103,14 @@ static void signalsAndProfiles()
     CHECK(j == JITTER_FLOOR_MS && m == 30 + JITTER_MARGIN_MS);
     receiveBuffer(*profileInfo(0x80), j, m);
     CHECK(j == JITTER_FLOOR_MS && m == 80 + JITTER_MARGIN_MS);
+    /* a batched (LoRa) hop: start at the batch wait in whole frames, room
+     * for a whole batch on top */
+    receiveBuffer(*profileInfo(0x10), j, m, true);
+    CHECK(j == 3200 && m == 3200 + 12 * 400 + JITTER_MARGIN_MS);
+    receiveBuffer(*profileInfo(0x30), j, m, true);
+    CHECK(j == 3000 && m == 3000 + 12 * 200 + JITTER_MARGIN_MS);
+    receiveBuffer(*profileInfo(0x10), j, m, false);
+    CHECK(j == 400);
 
     const uint8_t F = MODE_FULL_DUPLEX, H = MODE_HALF_DUPLEX;
     auto is = [](CallFit f, uint8_t p, uint8_t m) { return f.profile == p && f.mode == m; };

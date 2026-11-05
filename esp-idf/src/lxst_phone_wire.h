@@ -168,10 +168,19 @@ CallFit autoProfile(uint32_t hopBps, int rtt_ms);
 
 /** Receive buffering for a profile: playback starts at frame_ms ×
  *  max(1, buffer − 2), never under JITTER_FLOOR_MS; the buffer holds
- *  frame_ms × (buffer + 1) plus JITTER_MARGIN_MS. */
+ *  frame_ms × (buffer + 1) plus JITTER_MARGIN_MS.
+ *
+ *  A batched hop (a LoRa first hop: SUPE hands a peer's frames up together
+ *  when its exchange closes, up to BATCH_FRAMES at once, and a sender holds a
+ *  packet up to BATCH_WAIT_MS for its exchange) starts playback at
+ *  BATCH_WAIT_MS rounded up to whole frames, so a talk spurt rides out the
+ *  gap between batches (the speaker's hold follows the start), and holds a
+ *  whole batch on top of that. */
 constexpr int JITTER_FLOOR_MS  = 60;
 constexpr int JITTER_MARGIN_MS = 250;
-void receiveBuffer(const ProfileInfo& p, uint16_t& jitter_ms, uint16_t& max_jitter_ms);
+constexpr int BATCH_WAIT_MS    = 3000;
+constexpr int BATCH_FRAMES     = 12;
+void receiveBuffer(const ProfileInfo& p, uint16_t& jitter_ms, uint16_t& max_jitter_ms, bool batchedHop = false);
 
 /* ── text ── */
 
