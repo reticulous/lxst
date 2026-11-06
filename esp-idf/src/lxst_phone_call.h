@@ -114,8 +114,9 @@ public:
     Act      acts[MAX_ACTS];
     int      nActs = 0;
 
-    /** Caller: start dialling. */
-    void dial(int64_t now);
+    /** Caller: start dialling, in full duplex or as push to talk (half
+     *  duplex, told to the callee with RINGING's reply). */
+    void dial(int64_t now, bool pushToTalk = false);
     /** Caller: the link is up. RINGING must come within ringBoundMs. */
     void linkActive(int64_t now, int32_t ringBoundMs);
     /** Callee: an identified, allowed caller's link becomes the call; it
@@ -137,19 +138,28 @@ public:
      *  mode `m`: the open session follows, and the peer is told what changed
      *  with PREFERRED_PROFILE and PREFERRED_MODE in one packet — now once
      *  the callee rings, after ESTABLISHED when ringing here, and with
-     *  RINGING while the caller still waits for it. A move from full to half
-     *  duplex sets hopHalf; a move back to full clears it. */
+     *  RINGING while the caller still waits for it. */
     void setProfile(uint8_t id, uint8_t m);
-    /** The call is half duplex only because its first hop carries no
-     *  full-duplex profile; cleared when the peer prefers a mode itself. */
-    bool hopHalf = false;
+    /** The local user dialled a push-to-talk call: half duplex for the whole
+     *  call, the peer's mode preference ignored. */
+    bool ptt = false;
     /** The profile a first-hop step-down replaced, 0 for none: the task moves
      *  back to it when the hop carries it again. Cleared when the peer
      *  prefers a profile itself. */
     uint8_t hopWant = 0;
-    /** The call may run full duplex: it is, or it is half duplex only
-     *  because of its first hop. */
-    bool fullOk() const { return mode == MODE_FULL_DUPLEX || hopHalf; }
+    /** What a first hop of hopBps does to the call wanting profile `want`
+     *  (hopBps 0, unknown, fits). The hop never changes the call's mode: a
+     *  call is half duplex only as push to talk or because the peer prefers
+     *  it.
+     *    HOP_FITS       f is the profile and mode it runs at
+     *    HOP_WAIT       ringing here, the caller's preferences not heard yet
+     *                   (they follow RINGING), and only half duplex fits:
+     *                   a caller preferring half duplex is let in
+     *    HOP_FULL_SLOW  no profile fits full duplex but one fits half: the
+     *                   call is refused or ended
+     *    HOP_SLOW       none fits even one way: refused or ended */
+    enum HopStep : uint8_t { HOP_FITS, HOP_WAIT, HOP_FULL_SLOW, HOP_SLOW };
+    HopStep hop(uint8_t want, uint32_t hopBps, CallFit& f) const;
     /** The task ends the call because the route cannot carry it: R_FAILED and
      *  the link torn down; a callee still ringing tells the caller BUSY
      *  first. False with no call. */
@@ -168,6 +178,8 @@ private:
     int64_t waitBy_ = 0, ringBy_ = 0, toneUntil_ = 0;
     /* callee: preferences owed to the caller after ESTABLISHED */
     bool    profOwed_ = false, modeOwed_ = false;
+    /* callee: the caller's preferences were heard while ringing */
+    bool    prefsHeard_ = false;
 
     void push(const Act& a);
     void sig1(uint16_t s);

@@ -24,7 +24,7 @@
         <CallView v-if="callShown" :call="c" :audio="ph.audio.value" :half-duplex="ph.halfDuplex.value"
                   :held="ph.pttHeld.value" :error="ph.inCall.value ? ph.cmdError.value : ''"
                   @answer="ph.answer" @reject="ph.reject" @hangup="ph.hangup" @mute="ph.setMuted"
-                  @ptt="ph.setPtt" @take="ph.takeAudio" @resume="ph.resume" />
+                  @ptt="ph.setPtt" @take="ph.takeAudio" @resume="ph.resume" @redial-ptt="onRedialPtt" />
 
         <div v-if="!ph.inCall.value" class="rest">
           <div v-if="c.state === 'off'" class="offline">
@@ -45,11 +45,15 @@
             </div>
           </div>
 
-          <form class="dial" @submit.prevent="onDial">
+          <form class="dial" @submit.prevent="onDial(false)">
             <input v-model="typed" class="in" spellcheck="false" autocomplete="off"
                    placeholder="Phone, identity or LXMF address" />
             <button class="go" type="submit" :disabled="!dialable" title="Call">
               <q-icon :name="matCall" size="16px" /><span>Call</span>
+            </button>
+            <button class="go ptt" type="button" :disabled="!dialable" title="Push-to-talk call (half duplex)"
+                    @click="onDial(true)">
+              <q-icon :name="matMic" size="16px" /><span>Push to talk</span>
             </button>
           </form>
           <div v-if="ph.cmdError.value" class="err">{{ ph.cmdError.value }}</div>
@@ -62,9 +66,9 @@
           <div class="list">
             <CallLog v-if="tab === 'recent'" :entries="ph.log.value" :disabled="ph.inCall.value" @call="onCall" />
             <PeerList v-else-if="tab === 'peers'" :rows="peerRows" :disabled="ph.inCall.value"
-                      empty="No phone heard announcing yet." @call="onCall" />
+                      empty="No phone heard announcing yet." @call="onCall" @ptt="h => onCall(h, true)" />
             <PeerList v-else :rows="contactRows" :disabled="ph.inCall.value"
-                      empty="No LXMF contacts." @call="onCall" />
+                      empty="No LXMF contacts." @call="onCall" @ptt="h => onCall(h, true)" />
           </div>
         </div>
       </div>
@@ -81,7 +85,7 @@ const tab = _ref<Tab>('recent')
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { matCall, matCheck, matContentCopy } from '@quasar/extras/material-icons'
+import { matCall, matCheck, matContentCopy, matMic } from '@quasar/extras/material-icons'
 import FloatingWindow from 'spangap-browser/components/FloatingWindow.vue'
 import { focusedWindowId } from 'spangap-browser/lib/windows'
 import { useWinZoom } from 'rns/lib/winZoom'
@@ -111,12 +115,17 @@ const callShown = computed(() => ph.inCall.value || c.value.state === 'ended')
 /* ── Dialling ── */
 const typed = ref('')
 const dialable = computed(() => !ph.inCall.value && normaliseHash(typed.value) !== '')
-function onDial() {
+/* ptt: a push-to-talk call, half duplex throughout. */
+function onDial(ptt = false) {
   if (!dialable.value) return
-  if (ph.dial(typed.value)) typed.value = ''
+  if (ph.dial(typed.value, ptt)) typed.value = ''
 }
-function onCall(hash: string) {
-  if (!ph.inCall.value) ph.dial(hash)
+function onCall(hash: string, ptt = false) {
+  if (!ph.inCall.value) ph.dial(hash, ptt)
+}
+function onRedialPtt() {
+  const h = c.value.peerDest || c.value.peer
+  if (h) onCall(h, true)
 }
 
 const peerRows = computed<PeerRow[]>(() => ph.peers.value.map(p => ({
@@ -200,6 +209,7 @@ watch(focusedWindowId, (id) => { if (id !== 'phone') ph.setPtt(false) })
 .go { flex: none; display: inline-flex; align-items: center; gap: 4px; background: #2f8a4a; border: none; color: #fff;
       border-radius: 6px; padding: 4px 12px; cursor: pointer; font-weight: 700; font-size: calc(12.5px * var(--rfs, 1)); }
 .go:disabled { background: #333; color: #777; cursor: default; }
+.go.ptt:not(:disabled) { background: #2a2a2a; border: 1px solid #444; color: #cfcfcf; }
 .err { color: #e09b6a; font-size: calc(12px * var(--rfs, 1)); }
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid #333; }
 .tab { background: none; border: none; color: #9a9a9a; padding: 6px 10px; cursor: pointer;

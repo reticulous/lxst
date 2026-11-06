@@ -127,7 +127,14 @@ struct __attribute__((packed)) lxst_profile_t {
      * well-formed LXST frame up to 512 bytes, arrival order. 0: frames must fit
      * the profile. */
     uint8_t  rx_any;
+    /* Push-to-talk pre-roll, 0 off. Above 0, while the transmit mode is ptt and
+     * the device's microphone has the session, the microphone stays open and a
+     * talk spurt starts with the last preroll_ms (at most LXST_PREROLL_MAX_MS)
+     * heard before the key went down. */
+    uint16_t preroll_ms;
 };
+
+constexpr uint16_t LXST_PREROLL_MAX_MS = 1000;
 
 /* lxst_profile_t.tx_mode */
 enum : uint8_t {

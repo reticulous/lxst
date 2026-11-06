@@ -43,22 +43,30 @@
  *                           no answer · failed · cancelled
  * RAM:
  *   lxst.phone.state        off · idle · dialling · ringback · ringing ·
- *                           connecting · live · ended (3 s, then idle)
+ *                           connecting · live · ended (3 s, 10 s with
+ *                           ptt_redial, then idle)
  *   lxst.phone.dir / .peer / .peer_dest / .peer_name   the current or last call
  *   lxst.phone.status       one finished line ("Calling Alice…", "Incoming call" …)
  *   lxst.phone.timer        "m:ss" since the call went live, each second; "" else
  *   lxst.phone.muted        1 while our microphone is muted for the call
  *   lxst.phone.profile      the call's profile ("Opus medium, 60 ms"); "" no call
  *   lxst.phone.mode         full duplex · half duplex; "" no call
+ *   lxst.phone.ptt_redial   1 while ended after an outgoing call the route
+ *                           carried only half duplex for: a push-to-talk call
+ *                           to the same peer would fit
+ *   lxst.phone.test_hop_bps written by a tester: nonzero stands in for the
+ *                           call link's first-hop bitrate (0, unset: off)
  *   lxst.phone.dest / .ident  our lxst.telephony destination and identity hash
  *   lxst.phone.peers.<dest>.{ident,name,hops,heard}
  *                           phones heard announcing (the newest 32; heard Unix s)
  * Commands (consumed; a refusal's reason lands on lxst.phone.cmd.error, which
  * the next accepted command clears):
- *   lxst.phone.cmd          call <hash> · answer · reject · hangup · mute 1 ·
- *                           mute 0 · announce. <hash>: an lxst.telephony
- *                           destination, an identity, or an LXMF delivery
- *                           destination (spaces ignored, 64 hex cut to 32).
+ *   lxst.phone.cmd          call <hash> · call <hash> ptt (push to talk: half
+ *                           duplex throughout) · answer · reject · hangup ·
+ *                           mute 1 · mute 0 · announce. <hash>: an
+ *                           lxst.telephony destination, an identity, or an
+ *                           LXMF delivery destination (spaces ignored, 64 hex
+ *                           cut to 32).
  */
 #pragma once
 

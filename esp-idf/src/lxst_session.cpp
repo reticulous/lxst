@@ -12,7 +12,8 @@
  *   consumer ─ OP_FRAMES ─▶ per-speaker LxstJitter (encoded) ─ due ─▶ decode
  *            ─▶ per-speaker PCM leftover ─▶ mix one block (+ call tone)
  *            ─▶ endpoint.play
- *   endpoint mic (or tone) ─▶ unit buffer ─▶ audio_fc encode ─▶ LXST frame
+ *   endpoint mic (or tone) ─▶ MicChain (device, s.lxst.agc) ─▶ gate, meter
+ *            ─▶ unit buffer ─▶ audio_fc encode ─▶ LXST frame
  *            ─▶ LxstBatcher ─ EV_BATCH ─▶ consumer
  *
  * The consumer is the room (port 1) or a live call (port 3), lxst_arb.h. The
@@ -25,6 +26,7 @@
 #include "lxst_batch.h"
 #include "lxst_jitter.h"
 #include "lxst_dsp.h"
+#include "lxst_ring.h"
 #include "lxst_tones.h"
 #include "lxst_arb.h"
 #include "lxst_endpoint.h"
@@ -130,6 +132,7 @@ struct Speaker {
 struct Stats {
     uint64_t encSum = 0; uint32_t encN = 0, encMax = 0;
     uint64_t decSum = 0; uint32_t decN = 0, decMax = 0;
+    uint64_t agcSum = 0; uint32_t agcN = 0, agcMax = 0;
     uint32_t txFrames = 0, txDropped = 0;
     uint32_t rxFrames = 0, concealed = 0, late = 0, dropped = 0, underruns = 0;
     uint32_t blocksDropped = 0, ticksSkipped = 0;
@@ -201,6 +204,13 @@ static bool     s_voxOpen = false;
 static lxsess::Ownership s_own;             /* endpoint owner and the four talk sources */
 static int      s_toneHz = 0;
 static lxsess::Tone s_tone;
+static lxsess::MicChain s_micChain;         /* the device's capture conditioner */
+static bool     s_agcOn = true;             /* s.lxst.agc */
+static bool     s_micFresh = true;          /* the chain resets on its next block */
+static int16_t* s_micBuf = nullptr;
+static lxsess::PcmRing s_pre;               /* push-to-talk pre-roll, the device's mic */
+static int      s_preKeep = 0;              /* samples held while the key is up */
+static bool     s_preTailDone = false;      /* tail over, the spurt ends once s_pre drains */
 static bool     s_keysSubscribed = false;
 static int64_t  s_nextKeyTryUs = 0;
 
@@ -370,10 +380,17 @@ static void encoderBuild()
 
 /* ───────────── transmit ───────────── */
 
+/* Pre-roll runs for a ptt session that may transmit on the device's mic. */
+static bool prerollOn()
+{
+    return s_preKeep > 0 && s_mode == MODE_PTT && s_live && s_enc && s_canSpeak && !s_muted
+        && s_ep == lxstDeviceEndpoint();
+}
+
 static bool micWanted()
 {
     if (!s_live || !s_enc || !s_canSpeak || s_muted) return false;
-    return s_mode != MODE_PTT || s_tx != TX_IDLE;
+    return s_mode != MODE_PTT || s_tx != TX_IDLE || prerollOn();
 }
 
 static bool anySpeaker()
@@ -398,13 +415,16 @@ static void clockUpdate()
 
 static void micUpdate()
 {
-    if (!s_ep || !s_ep->isOpen()) return;
+    if (!s_ep || !s_ep->isOpen()) { s_micFresh = true; s_pre.clear(); return; }
     s_ep->capture(micWanted() && s_toneHz <= 0);
+    bool feeding = s_toneHz > 0 ? micWanted() : s_ep->capturing();
+    if (!feeding) { s_micFresh = true; s_pre.clear(); }
 }
 
 static void spurtStart()
 {
     s_tx = TX_ON;
+    s_preTailDone = false;
     s_unitFill = 0;
     s_frameUnits = 0;
     s_frameLen = 0;
@@ -425,6 +445,8 @@ static void spurtEnd(bool send)
     if (s_tail) esp_timer_stop(s_tail);
     s_tailFired.store(false);
     s_tx = TX_IDLE;
+    s_preTailDone = false;
+    s_pre.clear();
     s_micLevel.store(0, std::memory_order_relaxed);
     s_unitFill = 0;
     s_frameUnits = 0;
@@ -495,20 +517,51 @@ static void encodeUnit()
     frameDone();
 }
 
-/* Microphone (or test tone) PCM: the voice gate, then the encoder. */
-static void txInput(const int16_t* pcm, int n)
+static void unitFeed(const int16_t* pcm, int n);
+
+/* Microphone (or test tone) PCM: the voice gate, then the encoder, through the
+ * pre-roll ring while it is in use. `gateRms` is the conditioner's level before
+ * its gain, or negative when the block was not conditioned. */
+static void txInput(const int16_t* pcm, int n, float gateRms)
 {
     float rms = lxsess::blockRms(pcm, n);
     if (s_mode == MODE_VOX) {
         int64_t now = esp_timer_get_time();
-        if (lxsess::rmsDbfs(rms) > (float)s_voxDb)
+        if (lxsess::rmsDbfs(gateRms >= 0 ? gateRms : rms) > (float)s_voxDb)
             s_voxUntilUs = now + (int64_t)VOX_HANG_MS * 1000;
         bool open = now < s_voxUntilUs;
         if (open != s_voxOpen) { s_voxOpen = open; txEval(); }
     }
+    bool pre = prerollOn();
+    if (!pre && s_pre.size()) s_pre.clear();
+    if (pre) {
+        s_pre.push(pcm, n);
+        if (s_tx == TX_IDLE) { s_pre.trim(s_preKeep); return; }
+    }
     if (s_tx == TX_IDLE || !s_enc || !s_unitBuf) return;
     float lvl = rms * 4.0f;
     s_micLevel.store(lvl >= 1.0f ? 100 : (int)(lvl * 100.0f + 0.5f), std::memory_order_relaxed);
+    if (!pre) { unitFeed(pcm, n); return; }
+    /* Oldest first, at most twice what came in: the backlog drains at twice
+     * real time, the partyline server's refill rate. */
+    int left = 2 * n;
+    while (left > 0 && s_pre.size() && s_tx != TX_IDLE) {
+        const int16_t* p;
+        int run = s_pre.front(&p);
+        if (run > left) run = left;
+        unitFeed(p, run);
+        s_pre.drop(run);
+        left -= run;
+    }
+    if (s_preTailDone && !s_pre.size() && s_tx == TX_TAIL) {
+        spurtEnd(true);
+        micUpdate();
+        clockUpdate();
+    }
+}
+
+static void unitFeed(const int16_t* pcm, int n)
+{
     while (n > 0) {
         int take = s_unitSamples - s_unitFill;
         if (take > n) take = n;
@@ -523,10 +576,36 @@ static void txInput(const int16_t* pcm, int n)
     }
 }
 
+/* The device endpoint's capture (or the tone standing in for it) goes through
+ * the conditioner before the gate, the meter and the encoder read it; the
+ * browser conditions its own. */
+static void micInput(int16_t* pcm, int n)
+{
+    if (!s_agcOn || s_ep != lxstDeviceEndpoint()) { txInput(pcm, n, -1.0f); return; }
+    if (s_micFresh) {
+        s_micChain.reset(s_rate);
+        s_micFresh = false;
+    }
+    int64_t t0 = esp_timer_get_time();
+    s_micChain.process(pcm, n);
+    uint32_t us = (uint32_t)(esp_timer_get_time() - t0);
+    s_st.agcSum += us;
+    s_st.agcN++;
+    if (us > s_st.agcMax) s_st.agcMax = us;
+    txInput(pcm, n, s_micChain.inRms);
+}
+
 void Sink::onMic(const int16_t* pcm, int n)
 {
     if (s_toneHz > 0) return;               /* the tone stands in for the mic */
-    txInput(pcm, n);
+    if (!s_agcOn || s_ep != lxstDeviceEndpoint() || !s_micBuf) { txInput(pcm, n, -1.0f); return; }
+    while (n > 0) {
+        int take = n > MAX_UNIT_SAMPLES ? MAX_UNIT_SAMPLES : n;
+        memcpy(s_micBuf, pcm, (size_t)take * 2);
+        micInput(s_micBuf, take);
+        pcm += take;
+        n -= take;
+    }
 }
 
 static void txEval()
@@ -553,7 +632,7 @@ static void txEval()
         break;
     case TX_TAIL:
         if (!gateOk) spurtEnd(true);
-        else if (keyed) { esp_timer_stop(s_tail); s_tx = TX_ON; }
+        else if (keyed) { esp_timer_stop(s_tail); s_tx = TX_ON; s_preTailDone = false; }
         break;
     }
     micUpdate();
@@ -766,6 +845,22 @@ static void publishTxMode()
     storageSet("lxst.tx_mode", s_profOk ? n : "");
 }
 
+/* The pre-roll ring for the profile: preroll_ms at the session rate, plus the
+ * largest block that arrives while it drains. None without a valid profile. */
+static void prerollSize()
+{
+    int ms = s_prof.preroll_ms > LXST_PREROLL_MAX_MS ? LXST_PREROLL_MAX_MS : s_prof.preroll_ms;
+    int keep = s_profOk ? s_rate * ms / 1000 : 0;
+    int cap = keep > 0 ? keep + MAX_UNIT_SAMPLES : 0;
+    if (cap != s_pre.cap) {
+        if (s_pre.buf) lxstFree(s_pre.buf);
+        int16_t* b = cap ? (int16_t*)lxstAlloc((size_t)cap * sizeof(int16_t)) : nullptr;
+        s_pre.attach(b, cap);
+    }
+    s_pre.clear();
+    s_preKeep = s_pre.cap ? keep : 0;
+}
+
 static void applyProfile(const lxst_profile_t& p)
 {
     spurtEnd(false);
@@ -791,6 +886,7 @@ static void applyProfile(const lxst_profile_t& p)
              (unsigned)p.mode, (unsigned)p.frame_ms, (unsigned)p.max_frame_bytes);
     }
     encoderBuild();
+    prerollSize();
     storageSet("lxst.profile", name);
     publishTxMode();
     info("lxst: profile %s", s_profOk ? name : "(invalid)");
@@ -819,6 +915,7 @@ static void ownerChanged()
     spurtEnd(true);
     s_voxOpen = false;
     s_voxUntilUs = 0;
+    s_micFresh = true;
     LxstEndpoint* next = ownerEndpoint();
     if (next != s_ep) {
         if (s_ep) s_ep->close();
@@ -857,6 +954,7 @@ static void audioOpen()
                           storageGetInt("s.audio.block_ms", ENGINE_BLOCK_MS_DEFAULT),
                           LXST_EP_MAX_BLOCK, &s_rate, &s_blockMs);
     s_spb = s_rate * s_blockMs / 1000;
+    s_micFresh = true;
     s_ep = ownerEndpoint();
     if (!s_ep->open(&s_sink, s_rate, s_blockMs)) warn("lxst: audio endpoint not up yet");
     s_t.audioOpen = true;
@@ -899,6 +997,7 @@ static void sessionOpen()
     s_own.releaseDevice();                    /* the "0" written below lands later */
     s_voxOpen = false;
     s_voxUntilUs = 0;
+    s_micFresh = true;
 #if CONFIG_SPANGAP_LCD
     s_keysSubscribed = lcdKeySubscribe(AUX_KEYS);
     s_nextKeyTryUs = esp_timer_get_time() + (int64_t)KEY_RETRY_MS * 1000;
@@ -932,6 +1031,7 @@ static void sessionClose()
     s_enc = nullptr;
     s_batch.release();
     s_profOk = false;
+    prerollSize();                            /* frees the ring */
     s_own.releaseDevice();                    /* every device talk source starts released */
     s_voxOpen = false;
     storageSet("lxst.cmd.ptt", "0");
@@ -1215,14 +1315,23 @@ static void onCmdPtt(const char*, const char* val)
     talkKey(lxsess::TALK_DEV_CMD, val && val[0] == '1');
 }
 
+static void onAgc(const char*, const char*)
+{
+    s_agcOn = storageGetInt("s.lxst.agc", 1) != 0;
+    s_micFresh = true;
+}
+
 static void onTone(const char*, const char*)
 {
+    int db = storageGetInt("lxst.test_tone_db", -12);
+    s_tone.peakDb = (float)(db > 0 ? 0 : db < -90 ? -90 : db);
     int hz = storageGetInt("lxst.test_tone", 0);
     if (hz < 0) hz = 0;
     if (hz > 0 && hz >= s_rate / 2) hz = s_rate / 2 - 1;
     if (hz == s_toneHz) return;
-    if (!s_toneHz) s_tone = lxsess::Tone();
+    if (!s_toneHz) s_tone.phase = 0;
     s_toneHz = hz;
+    s_micFresh = true;
     if (s_live) txEval();
 }
 
@@ -1251,6 +1360,8 @@ static void publishStats()
     storageSet("lxst.stats.enc_us_max", (int)s_st.encMax);
     storageSet("lxst.stats.dec_us_avg", (int)(s_st.decN ? s_st.decSum / s_st.decN : 0));
     storageSet("lxst.stats.dec_us_max", (int)s_st.decMax);
+    storageSet("lxst.stats.agc_us_avg", (int)(s_st.agcN ? s_st.agcSum / s_st.agcN : 0));
+    storageSet("lxst.stats.agc_us_max", (int)s_st.agcMax);
     storageSet("lxst.stats.frames_tx", (int)s_st.txFrames);
     storageSet("lxst.stats.tx_dropped", (int)s_st.txDropped);
     storageSet("lxst.stats.frames_rx", (int)s_st.rxFrames);
@@ -1286,7 +1397,16 @@ static void serviceSession()
 #endif
     micUpdate();
     if (s_tailFired.exchange(false) && s_tx == TX_TAIL) {
-        spurtEnd(true);
+        if (prerollOn() && s_pre.size()) {
+            s_preTailDone = true;           /* txInput ends it once the backlog is sent */
+        } else {
+            spurtEnd(true);
+            micUpdate();
+            clockUpdate();
+        }
+    }
+    if (s_preTailDone && s_tx == TX_TAIL && !(prerollOn() && s_pre.size())) {
+        spurtEnd(true);                     /* the backlog went with the capture */
         micUpdate();
         clockUpdate();
     }
@@ -1296,7 +1416,7 @@ static void serviceSession()
     for (int i = 0; i < t && s_t.audioOpen; i++) {
         if (s_toneHz > 0 && micWanted()) {
             s_tone.fill(s_toneBuf, s_spb, s_toneHz, s_rate);
-            txInput(s_toneBuf, s_spb);
+            micInput(s_toneBuf, s_spb);
         }
         if (anySpeaker() || s_t.tone.active()) playoutTick(nowMs());
     }
@@ -1329,7 +1449,8 @@ static void lxstTask(void*)
     s_acc = (int32_t*)lxstAlloc(MAX_UNIT_SAMPLES * sizeof(int32_t));
     s_mix = (int16_t*)lxstAlloc(MAX_UNIT_SAMPLES * sizeof(int16_t));
     s_toneBuf = (int16_t*)lxstAlloc(MAX_UNIT_SAMPLES * sizeof(int16_t));
-    if (!s_rx || !s_unitBuf || !s_acc || !s_mix || !s_toneBuf) {
+    s_micBuf = (int16_t*)lxstAlloc(MAX_UNIT_SAMPLES * sizeof(int16_t));
+    if (!s_rx || !s_unitBuf || !s_acc || !s_mix || !s_toneBuf || !s_micBuf) {
         err("lxst: buffer alloc failed");
         killSelf();
     }
@@ -1361,11 +1482,14 @@ static void lxstTask(void*)
     storageSubscribeChanges("s.lxst.tx", onTxMode);
     storageSubscribeChanges("s.lxst.vox_db", onVoxDb);
     storageSubscribeChanges("lxst.cmd.ptt", onCmdPtt);
+    storageSubscribeChanges("s.lxst.agc", onAgc);
     storageSubscribeChanges("lxst.test_tone", onTone);
+    storageSubscribeChanges("lxst.test_tone_db", onTone);
     storageSubscribeChanges("lxst.cmd.claim", onClaim);
     s_t.setMode = (uint8_t)modeFrom(storageGetStr("s.lxst.tx", "ptt"));
     s_mode = (TxMode)s_t.setMode;
     onVoxDb(nullptr, nullptr);
+    onAgc(nullptr, nullptr);
     onTone(nullptr, nullptr);
 
     storageBegin();
@@ -1421,7 +1545,8 @@ static void cliLxst(const char* args)
         cliPrintf("%-*s voice session status, test tone, talk key\n", CLI_HELP_COL, "lxst");
         if (args && args[0] == '-') {
             cliPrintf("  lxst                 status and stats\n");
-            cliPrintf("  lxst tone <hz>|off   transmit a test tone instead of the mic\n");
+            cliPrintf("  lxst tone <hz> [dbfs]|off  transmit a test tone instead of the mic,\n"
+                      "                       peaking at dbfs (default -12)\n");
             cliPrintf("  lxst ptt 1|0         hold / release the device talk key\n");
         }
         return;
@@ -1430,9 +1555,16 @@ static void cliLxst(const char* args)
     if (args && !strncmp(args, "tone", 4)) {
         const char* v = args + 4;
         while (*v == ' ') v++;
-        int hz = (!*v || !strcmp(v, "off")) ? 0 : atoi(v);
+        int hz = (!*v || !strncmp(v, "off", 3)) ? 0 : atoi(v);
+        const char* d = strchr(v, ' ');
+        while (d && *d == ' ') d++;
+        int db = d && *d ? atoi(d) : -12;
+        if (db > 0) db = 0;
+        if (db < -90) db = -90;
+        storageSet("lxst.test_tone_db", db);
         storageSet("lxst.test_tone", hz);
-        cliPrintf("test tone %s\n", hz ? v : "off");
+        if (hz) cliPrintf("test tone %d Hz at %d dBFS peak\n", hz, db);
+        else cliPrintf("test tone off\n");
         return;
     }
     if (args && !strncmp(args, "ptt", 3)) {
@@ -1449,8 +1581,11 @@ static void cliLxst(const char* args)
     std::string tx = storageGetStr("lxst.tx_mode", "");
     if (tx.empty()) tx = storageGetStr("s.lxst.tx", "ptt");
     std::string vox = tx == "vox" ? " (vox " + std::to_string(storageGetInt("s.lxst.vox_db", -45)) + " dBFS)" : "";
-    cliPrintf("tx mode   %s%s, talking %d, mic level %d%%, tone %d Hz\n", tx.c_str(), vox.c_str(),
-              storageGetInt("lxst.talking", 0), lxstMicLevel(), storageGetInt("lxst.test_tone", 0));
+    cliPrintf("tx mode   %s%s, talking %d, mic level %d%%, tone %d Hz at %d dBFS\n", tx.c_str(),
+              vox.c_str(), storageGetInt("lxst.talking", 0), lxstMicLevel(),
+              storageGetInt("lxst.test_tone", 0), storageGetInt("lxst.test_tone_db", -12));
+    cliPrintf("mic agc   %s (device microphone and tone)\n",
+              storageGetInt("s.lxst.agc", 1) ? "on" : "off");
     cliPrintf("jitter    %d ms when the profile names none\n",
               storageGetInt("s.lxst.jitter_ms", 200));
     cliPrintf("stats\n");
@@ -1459,7 +1594,8 @@ static void cliLxst(const char* args)
         "lxst.stats.frames_rx", "lxst.stats.concealed", "lxst.stats.late",
         "lxst.stats.dropped", "lxst.stats.underruns", "lxst.stats.blocks_dropped",
         "lxst.stats.ticks_skipped", "lxst.stats.enc_us_avg", "lxst.stats.enc_us_max",
-        "lxst.stats.dec_us_avg", "lxst.stats.dec_us_max", "lxst.stats.heap_int",
+        "lxst.stats.dec_us_avg", "lxst.stats.dec_us_max", "lxst.stats.agc_us_avg",
+        "lxst.stats.agc_us_max", "lxst.stats.heap_int",
         "lxst.stats.heap_psram",
     };
     for (const char* k : keys) cliStat(k);
@@ -1475,6 +1611,7 @@ void LxstService::onInit()
     storageDefault("s.lxst.tx", "ptt");
     storageDefault("s.lxst.vox_db", -45);
     storageDefault("s.lxst.jitter_ms", 200);
+    storageDefault("s.lxst.agc", 1);
     storageEnd();
     cliRegisterCmd("lxst", cliLxst);
     s_task = spawnTask(lxstTask, TAG, LXST_TASK_STACK, nullptr, LXST_TASK_PRIO, CORE_SECONDARY,

@@ -99,6 +99,7 @@ void Call::busyTone(Result r, int64_t now)
 void Call::pref(uint32_t s)
 {
     uint32_t v = sigValue(s);
+    if (ph == PH_RINGING) prefsHeard_ = true;
     if (sigKind(s) == SIG_PROFILE) {
         if (!profileInfo(v)) return;
         uint8_t run = runProfile((uint8_t)v);
@@ -114,21 +115,21 @@ void Call::pref(uint32_t s)
         if (owe && ph != PH_RINGING) sig1((uint16_t)(PREFERRED_PROFILE + profile));
         return;
     } else {
-        if ((v != MODE_FULL_DUPLEX && v != MODE_HALF_DUPLEX) || v == mode) return;
+        if ((v != MODE_FULL_DUPLEX && v != MODE_HALF_DUPLEX) || v == mode || ptt) return;
         mode = (uint8_t)v;
-        hopHalf = false;
         if (ph == PH_RINGING) modeOwed_ = false;
     }
     if (sessionOpen) act(A_PROFILE, profile | (uint32_t)mode << 8);
 }
 
-void Call::dial(int64_t now)
+void Call::dial(int64_t now, bool pushToTalk)
 {
     dir = DIR_OUT;
     ph = PH_DIAL;
     profile = DEFAULT_PROFILE;
-    mode = MODE_FULL_DUPLEX;
-    sessionOpen = identifySent = profOwed_ = modeOwed_ = hopHalf = false;
+    ptt = pushToTalk;
+    mode = ptt ? MODE_HALF_DUPLEX : MODE_FULL_DUPLEX;
+    sessionOpen = identifySent = profOwed_ = modeOwed_ = prefsHeard_ = false;
     hopWant = 0;
     result = R_NONE;
     liveAt = -1;
@@ -149,7 +150,7 @@ void Call::ring(int64_t now)
     ph = PH_RINGING;
     profile = DEFAULT_PROFILE;
     mode = MODE_FULL_DUPLEX;
-    sessionOpen = identifySent = profOwed_ = modeOwed_ = hopHalf = false;
+    sessionOpen = identifySent = profOwed_ = modeOwed_ = prefsHeard_ = ptt = false;
     hopWant = 0;
     result = R_NONE;
     liveAt = -1;
@@ -284,7 +285,6 @@ void Call::setProfile(uint8_t id, uint8_t m)
     if (!profileInfo(id) || (m != MODE_FULL_DUPLEX && m != MODE_HALF_DUPLEX)) return;
     bool prof = id != profile, md = m != mode;
     if (!prof && !md) return;
-    if (md) hopHalf = m == MODE_HALF_DUPLEX;
     profile = id;
     mode = m;
     if (sessionOpen) act(A_PROFILE, profile | (uint32_t)mode << 8);
@@ -301,6 +301,15 @@ void Call::setProfile(uint8_t id, uint8_t m)
     default:
         break;
     }
+}
+
+Call::HopStep Call::hop(uint8_t want, uint32_t hopBps, CallFit& f) const
+{
+    f = fitCall(want, hopBps, mode);
+    if (f.profile) return HOP_FITS;
+    if (!fitProfile(want, hopBps, MODE_HALF_DUPLEX)) return HOP_SLOW;
+    if (dir == DIR_IN && ph == PH_RINGING && !prefsHeard_) return HOP_WAIT;
+    return HOP_FULL_SLOW;
 }
 
 bool Call::fail(int64_t)

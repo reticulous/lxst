@@ -8,7 +8,8 @@
  *
  * Two screens on the one app layer, one shown at a time:
  *   - Home: a banner while a call is up (tap to return to it), our number
- *     (lxst.phone.dest), the dial field and Call, the phone's refusal
+ *     (lxst.phone.dest), the dial field, Call and PTT (a push-to-talk
+ *     call: half duplex throughout), the phone's refusal
  *     (lxst.phone.cmd.error), then the call log newest first (direction and
  *     outcome, tap to call back), the peers heard announcing a phone, and the
  *     LXMF contacts (read from lxmf's own s.lxmf.id.<n>.contacts.*).
@@ -19,7 +20,9 @@
  *     shows the microphone level (lxstMicLevel()) along its foot while
  *     talking and writes lxst.cmd.ptt 1/0 (the board's talk key works everywhere; Space
  *     is claimed here while no text field has focus). Ended: the status for
- *     the phone's three seconds, then home.
+ *     as long as the phone stays ended, then home; after an outgoing call
+ *     the route carried only half duplex for (lxst.phone.ptt_redial), "Call
+ *     as push-to-talk" with the focus, so Enter redials the peer that way.
  *
  * An incoming call raises the app over whatever is on the screen
  * (lcdShowProgram), waking the screen and closing any dialog first. On the
@@ -773,11 +776,12 @@ std::string dialable(const std::string& in) {
     return isHex(h, 32) || isHex(h, 64) ? h : "";
 }
 
-void placeCall(const std::string& target) {
+/* ptt: a push-to-talk call, half duplex throughout. */
+void placeCall(const std::string& target, bool ptt = false) {
     std::string h = dialable(target);
     if (h.empty()) { showToast("A number is 32 hexadecimal characters.", C_AMBER); return; }
     g_dialTarget = h.substr(0, 32);
-    phoneCmd("call " + h, true);
+    phoneCmd("call " + h + (ptt ? " ptt" : ""), true);
 }
 
 /* ---- home ---- */
@@ -988,7 +992,7 @@ void refreshHome() {
     lv_label_set_text(g_homeHdr.right, st == "idle" || st == "off" ? "" : st.c_str());
 }
 
-void onDial(lv_event_t*) {
+void dialTyped(bool ptt) {
     if (!s_dialTa) return;
     std::string h = dialable(lv_textarea_get_text(s_dialTa));
     if (h.empty()) {
@@ -998,8 +1002,10 @@ void onDial(lv_event_t*) {
     }
     lv_textarea_set_text(s_dialTa, "");
     lcdKeyboardClose();
-    placeCall(h);
+    placeCall(h, ptt);
 }
+void onDial(lv_event_t*)    { dialTyped(false); }
+void onDialPtt(lv_event_t*) { dialTyped(true); }
 
 void openCall();
 
@@ -1046,6 +1052,7 @@ void buildHome() {
         if (s_dialTa) lv_obj_set_style_border_color(s_dialTa, lv_color_hex(C_FIELD), 0);
     }, LV_EVENT_VALUE_CHANGED, nullptr);
     mkButton(dial, "Call", BTN_GO, onDial, nullptr, IC_CALL);
+    mkButton(dial, "PTT", BTN_GHOST, onDialPtt, nullptr, IC_MIC);   /* push-to-talk call */
 
     s_errLbl = mkWrapFull(body, "", C_AMBER, kSmall);
     lv_obj_set_style_pad_hor(s_errLbl, lcdPx(6), 0);
@@ -1082,6 +1089,7 @@ lv_obj_t* s_bMuteLbl = nullptr;
 lv_obj_t* s_bMuteIcon = nullptr;
 lv_obj_t* s_bHang = nullptr;
 lv_obj_t* s_bHangLbl = nullptr;
+lv_obj_t* s_bPtt = nullptr;             /* ended: redial as push to talk (lxst.phone.ptt_redial) */
 lv_timer_t* g_ringTimer = nullptr;
 int  g_ringPhase = 0;
 bool g_pttHeld = false;
@@ -1186,6 +1194,10 @@ void onAnswer(lv_event_t*) { phoneCmd("answer", true); }
 void onReject(lv_event_t*) { phoneCmd("reject", false); }
 void onHang(lv_event_t*)   { pttRelease(); phoneCmd("hangup", false); }
 void onMute(lv_event_t*)   { phoneCmd(phMuted() ? "mute 0" : "mute 1", false); }
+void onPttRedial(lv_event_t*) {
+    std::string d = lower(storageGetStr("lxst.phone.peer_dest", ""));
+    placeCall(d.empty() ? callPeerHash() : d, true);
+}
 
 /* On the ringing screen Backspace (and a keyboard's Esc) rejects. Run ahead of
  * the shell's Esc-is-Back hook, which then never sees the key. */
@@ -1235,6 +1247,8 @@ void refreshCall() {
     showIf(s_bAnswer, ring);
     showIf(s_bMute, live);
     showIf(s_bHang, live || setup);
+    bool redial = ended && dir == "out" && storageGetInt("lxst.phone.ptt_redial", 0) != 0;
+    showIf(s_bPtt, redial);
     lv_label_set_text(s_bHangLbl, live ? "Hang up" : "Cancel");
     if (live) {
         bool m = phMuted();
@@ -1244,10 +1258,10 @@ void refreshCall() {
     }
     refreshTalk();
 
-    std::string shape = ring ? "ring" : live ? "live" : setup ? "setup" : "over";
+    std::string shape = ring ? "ring" : live ? "live" : setup ? "setup" : redial ? "redial" : "over";
     if (shape != g_callShape && g_screen == SC_CALL) {
         g_callShape = shape;
-        deferFocus(ring ? s_bAnswer : live ? s_bMute : setup ? s_bHang : g_callHdr.back);
+        deferFocus(ring ? s_bAnswer : live ? s_bMute : setup ? s_bHang : redial ? s_bPtt : g_callHdr.back);
     }
     updateSpaceClaim();
 }
@@ -1305,7 +1319,8 @@ void buildCall() {
     s_bMute = mkButton(bar, "Mute", BTN_GHOST, onMute, &s_bMuteLbl, IC_MIC, &s_bMuteIcon);
     s_bHang = mkButton(bar, "Hang up", BTN_STOP, onHang, &s_bHangLbl, IC_HANGUP);
     s_bAnswer = mkButton(bar, "Answer", BTN_GO, onAnswer, nullptr, IC_CALL);
-    for (lv_obj_t* b : { s_bReject, s_bMute, s_bHang, s_bAnswer }) {
+    s_bPtt = mkButton(bar, "Call as push-to-talk", BTN_GO, onPttRedial, nullptr, IC_MIC);
+    for (lv_obj_t* b : { s_bReject, s_bMute, s_bHang, s_bAnswer, s_bPtt }) {
         lv_obj_set_width(b, 1);
         lv_obj_set_flex_grow(b, 1);
         lv_obj_set_style_pad_ver(b, lcdPx(8), 0);
@@ -1442,7 +1457,7 @@ void resetHandles() {
     g_callHdr = Header{};
     s_cIcon = s_cName = s_cHash = s_cStatus = s_cTimer = s_cProf = nullptr;
     s_talkRow = s_talk = s_talkLbl = s_talkLvl = nullptr;
-    s_bReject = s_bAnswer = s_bMute = s_bMuteLbl = s_bMuteIcon = s_bHang = s_bHangLbl = nullptr;
+    s_bReject = s_bAnswer = s_bMute = s_bMuteLbl = s_bMuteIcon = s_bHang = s_bHangLbl = s_bPtt = nullptr;
     g_callShape.clear();
     g_focusTarget = nullptr;
     g_canTalk = false;

@@ -20,6 +20,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_heap_caps.h"
@@ -54,6 +55,7 @@ static const char* TAG = LXST_PHONE_TASK;
 #define PH_IDENT_RECHECK_MS 2000
 #define PH_RETRY_MS      5000
 #define PH_ENDED_MS      3000
+#define PH_ENDED_PTT_MS  10000   /* ended with lxst.phone.ptt_redial: time to take the offer */
 #define PH_RESOLVE_MS    500
 #define PH_PATH_ASK_MS   15000
 #define PH_SPEAKER       1u
@@ -238,6 +240,8 @@ struct Ctx {
     bool        resolving = false;
     int64_t     resolveAt = 0, askAt = 0;
     const char* why = "";           /* a failure's reason, for the status line */
+    bool        pttRedial = false;  /* outbound: ended for a route that carries only
+                                       half duplex; lxst.phone.ptt_redial */
     int64_t     heardAt = 0;        /* when the call's link last heard its peer: the
                                        call's start, then each move of
                                        rnsd.links.<tag>.heard_s */
@@ -513,6 +517,7 @@ static void publish()
     int64_t now = nowMs();
     const char* state;
     std::string status;
+    bool pttRedial = false;
     switch (s_call->ph) {
     case PH_DIAL:
     case PH_AWAIT:      state = "dialling";   status = "Calling " + peerLabel() + ELLIPSIS; break;
@@ -522,7 +527,7 @@ static void publish()
     case PH_LIVE:       state = "live";       status = s_liveStatus = liveStatus(now); break;
     case PH_BUSYTONE:   state = "ended";      status = endText(s_call->result); break;
     default:
-        if (now < s_endedUntil) { state = "ended"; status = s_endStatus; }
+        if (now < s_endedUntil) { state = "ended"; status = s_endStatus; pttRedial = s_ctx->pttRedial; }
         else if (!s_enabled || s_identKey.empty()) {
             state = "off";
             status = !s_identKey.empty() ? "Not taking calls"
@@ -537,6 +542,7 @@ static void publish()
     storageSet("lxst.phone.state", state);
     storageSet("lxst.phone.status", status.c_str());
     storageSet("lxst.phone.muted", s_muted ? 1 : 0);
+    storageSet("lxst.phone.ptt_redial", pttRedial ? 1 : 0);
     storageSet("lxst.phone.profile", call && pi ? pi->text : "");
     storageSet("lxst.phone.mode", !call ? "" : s_call->mode == MODE_HALF_DUPLEX ? "half duplex" : "full duplex");
     if (s_call->ph != PH_LIVE) storageSet("lxst.phone.timer", "");
@@ -669,7 +675,7 @@ static bool doAct(const Act& a, int64_t now)
         if (s_ctx->link >= 0) itsDisconnect(s_ctx->link);
         s_ctx->link = -1;
         s_endStatus = *s_ctx->why ? s_ctx->why : endText(r);
-        s_endedUntil = now + PH_ENDED_MS;
+        s_endedUntil = now + (s_ctx->pttRedial ? PH_ENDED_PTT_MS : PH_ENDED_MS);
         s_muted = false;
         info("lxphone: call %s %s: %s", s_call->dir == DIR_IN ? "from" : "to",
              s_ctx->peerIdent.empty() ? s_ctx->typed.c_str() : s_ctx->peerIdent.c_str(), resultName(r));
@@ -697,12 +703,24 @@ static void runActs()
 
 /* The call link's first hop: rnsd.links.<tag>.bitrate, and the hourly airtime
  * budget of a LoRa first hop (lora.<n>.airtime_{hour,limit}_ms; limit 0 = no
- * budget). Read by hopCheck. */
+ * budget). Read by hopCheck. A nonzero lxst.phone.test_hop_bps (RAM, a test
+ * hook) stands in for the bitrate. */
+static uint32_t s_testHopLogged = 0;
+
 static void hopRead(uint32_t& bps, uint32_t& usedMs, uint32_t& limitMs)
 {
     std::string lk = "rnsd.links." + s_ctx->tag + ".";
     int b = storageGetInt((lk + "bitrate").c_str(), 0);
     bps = b > 0 ? (uint32_t)b : 0;
+    int t = storageGetInt("lxst.phone.test_hop_bps", 0);
+    uint32_t test = t > 0 ? (uint32_t)t : 0;
+    if (test != s_testHopLogged) {
+        if (test) info("lxphone: lxst.phone.test_hop_bps: first hop taken as %u bit/s (link reports %u)",
+                       (unsigned)test, (unsigned)bps);
+        else info("lxphone: lxst.phone.test_hop_bps off, first hop %u bit/s as the link reports", (unsigned)bps);
+        s_testHopLogged = test;
+    }
+    if (test) bps = test;
     usedMs = limitMs = 0;
     std::string iface = storageGetStr((lk + "iface").c_str(), "");
     if (iface.rfind("lora/", 0) == 0) {
@@ -715,24 +733,27 @@ static void hopRead(uint32_t& bps, uint32_t& usedMs, uint32_t& limitMs)
     }
 }
 
-/* The caller's profile and mode, settled before its RINGING reply: the user's
- * fixed profile or `auto`'s pick, fitted to the first hop (fitCall). */
+/* The caller's profile, settled before its RINGING reply: the user's fixed
+ * profile or `auto`'s pick, fitted to the first hop in the call's mode
+ * (fitCall). */
 static CallFit profileChoice()
 {
     uint32_t bps, used, lim;
     hopRead(bps, used, lim);
     std::string p = storageGetStr("s.lxst.phone.profile", "auto");
-    if (const ProfileInfo* pi = profileByKey(p)) return fitCall(pi->id, bps, true);
+    if (const ProfileInfo* pi = profileByKey(p)) return fitCall(pi->id, bps, s_call->mode);
     int rtt = storageGetInt(("rnsd.links." + s_ctx->tag + ".rtt_ms").c_str(), 0);
-    return autoProfile(bps, rtt);
+    return autoProfile(bps, rtt, s_call->mode);
 }
 
-/* Keep the call within what its first hop carries (fitCall): a full-duplex
- * call needs both directions to fit the hop, so one that does not is moved
- * to the best profile that does, or else to half duplex (push to talk) at
- * the best profile one direction fits; a call half duplex only for its hop
- * goes back to full duplex once the hop carries that. setProfile tells the
- * peer. With nothing that fits, the call ends "Route too slow for a call".
+/* Keep the call within what its first hop carries (Call::hop): a call keeps
+ * its mode and moves to the best profile that fits the hop in it (a
+ * full-duplex call needs both directions to fit); setProfile tells the peer.
+ * A full-duplex call no profile fits is refused or ended "Route too slow for
+ * a call": a caller as soon as its link is up, before it identifies; a
+ * callee once the caller's preferences (which follow RINGING) are heard, so
+ * a caller preferring half duplex is let in. A push-to-talk call, or one the
+ * peer made half duplex, ends so only when nothing fits even one way.
  * Over a hop with an hourly airtime budget a call is not started or answered
  * with less than MIN_TALK_S of talk left in it, and a live call ends
  * "Airtime limit reached" when it runs out. Runs on a change of the link's
@@ -752,11 +773,18 @@ static void hopCheck(int64_t now)
     /* Judge the profile a step-down replaced, so a hop that carries it again
      * gets it back. */
     uint8_t want = s_call->hopWant ? s_call->hopWant : pi->id;
-    CallFit f = fitCall(want, bps, s_call->fullOk());
-    if (!f.profile) {
-        warn("lxphone: first hop %u bit/s carries no profile (%s needs %u bit/s one way), ending the call",
-             (unsigned)bps, pi->text, (unsigned)txBps(*pi));
+    CallFit f;
+    Call::HopStep step = s_call->hop(want, bps, f);
+    if (step == Call::HOP_WAIT) return;
+    if (step != Call::HOP_FITS) {
+        if (step == Call::HOP_FULL_SLOW)
+            warn("lxphone: first hop %u bit/s carries no profile full duplex (%s needs %u bit/s each way), "
+                 "ending the call", (unsigned)bps, pi->text, (unsigned)txBps(*pi));
+        else
+            warn("lxphone: first hop %u bit/s carries no profile (%s needs %u bit/s one way), ending the call",
+                 (unsigned)bps, pi->text, (unsigned)txBps(*pi));
         s_ctx->why = "Route too slow for a call";
+        s_ctx->pttRedial = step == Call::HOP_FULL_SLOW && s_call->dir == DIR_OUT;
         s_call->fail(now);
         return;
     }
@@ -1030,6 +1058,7 @@ static void onOutLinkKey(const char* key, const char* val)
     if (v == "active") {
         int rtt = storageGetInt(("rnsd.links." + s_ctx->tag + ".rtt_ms").c_str(), 0);
         s_call->linkActive(now, std::max(10000, 5000 + 4 * rtt));
+        hopCheck(now);   /* the first hop is published before the link goes active */
         runActs();
     } else if (v == "failed" || v == "closed") {
         if (s_call->ph == PH_DIAL || s_call->ph == PH_AWAIT) s_ctx->why = "Not reachable";
@@ -1248,9 +1277,19 @@ static int annConnect(const char* aspect, void (*cb)(int, size_t))
 static void cmdError(const char* why) { storageSet("lxst.phone.cmd.error", why); }
 static void cmdOk() { storageSet("lxst.phone.cmd.error", ""); }
 
-static void cmdCall(const std::string& arg)
+/* "<hash>" dials full duplex, "<hash> ptt" push to talk ("ptt" is no hex, so
+ * never part of a spaced hash). */
+static bool splitPtt(std::string& arg)
+{
+    if (arg.size() < 3 || arg.compare(arg.size() - 3, 3, "ptt")) return false;
+    arg = trim(arg.substr(0, arg.size() - 3));
+    return true;
+}
+
+static void cmdCall(std::string arg)
 {
     if (s_call->ph != PH_NONE) { cmdError("A call is already up."); return; }
+    bool ptt = splitPtt(arg);
     std::string h = normHash(arg);
     if (h.empty()) { cmdError("That is not an address (32 hex characters)."); return; }
     cmdOk();
@@ -1260,7 +1299,8 @@ static void cmdCall(const std::string& arg)
     s_ctx->at = wallS();
     s_ctx->resolving = true;
     s_muted = false;
-    s_call->dial(now);
+    s_call->dial(now, ptt);
+    if (ptt) info("lxphone: push-to-talk call to %s", h.c_str());
     publish();
     resolveRun(now);
 }
@@ -1306,8 +1346,9 @@ static void onCmd(const char* key, const char*)
 
 /* ─────────────── task ─────────────── */
 
-static TaskHandle_t  s_task = nullptr;
-static volatile bool s_stop = false, s_parked = false;
+static TaskHandle_t      s_task = nullptr;
+static volatile bool     s_stop = false;
+static SemaphoreHandle_t s_parkedSem = nullptr;   /* given by the task each time it parks */
 
 static TickType_t pollTimeout(int64_t now)
 {
@@ -1455,27 +1496,31 @@ static void phoneTaskMain(void*)
             itsPoll(pollTimeout(nowMs()));
         }
         shutdown();
-        s_parked = true;
         info("stopped");
+        xSemaphoreGive(s_parkedSem);
         while (s_stop) itsPoll(portMAX_DELAY);
-        s_parked = false;
     }
 }
 
 static void phoneStart()
 {
     s_stop = false;
+    if (!s_parkedSem) s_parkedSem = xSemaphoreCreateBinary();
     if (!s_task) s_task = spawnTask(phoneTaskMain, TAG, 8192, nullptr, 1, 1, STACK_PSRAM);
     else xTaskNotifyGive(s_task);
 }
 
+/* rnsStop runs the stop hooks in reverse order and each returns only once its
+ * component is down, so the phone's links are torn down while rnsd and the
+ * interfaces still carry them. The hook waits on the task's park signal, at
+ * most 3 s. */
 static void phoneStop()
 {
     if (!s_task || s_stop) return;
+    xSemaphoreTake(s_parkedSem, 0);           /* a park signal left by a stop that timed out */
     s_stop = true;
     xTaskNotifyGive(s_task);
-    for (int i = 0; i < 300 && !s_parked; i++) delay(10);
-    if (!s_parked) warn("[%s] stop timed out", TAG);
+    if (xSemaphoreTake(s_parkedSem, pdMS_TO_TICKS(3000)) != pdTRUE) warn("[%s] stop timed out", TAG);
 }
 
 /* ─────────────── CLI ─────────────── */
@@ -1521,7 +1566,7 @@ static void cliPhone(const char* args)
     }
     if (args && cliWantsHelp(args)) {
         cliPrintf("phone                    state, call, our address\n");
-        cliPrintf("phone call <hash>        phone, identity or LXMF address\n");
+        cliPrintf("phone call <hash> [ptt]  phone, identity or LXMF address; ptt: push to talk\n");
         cliPrintf("phone answer | reject | hangup\n");
         cliPrintf("phone mute 1|0\n");
         cliPrintf("phone log [n] | peers | announce\n");
@@ -1547,8 +1592,9 @@ static void cliPhone(const char* args)
         return;
     }
     if (verb == "call") {
-        if (normHash(rest).empty()) { cliPrintf("usage: phone call <32 hex>\n"); return; }
-        cliCmd("call " + normHash(rest));
+        bool ptt = splitPtt(rest);
+        if (normHash(rest).empty()) { cliPrintf("usage: phone call <32 hex> [ptt]\n"); return; }
+        cliCmd("call " + normHash(rest) + (ptt ? " ptt" : ""));
         return;
     }
     if (verb == "answer" || verb == "reject" || verb == "hangup" || verb == "announce") { cliCmd(verb); return; }

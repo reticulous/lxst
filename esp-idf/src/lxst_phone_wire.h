@@ -150,10 +150,10 @@ struct CallFit {
     uint8_t profile = 0;
     uint8_t mode = 0;
 };
-/** What a call wanting profile `want` runs at over a first hop of hopBps:
- *  full duplex at fitProfile(want, …, full) when fullOk and that is not 0,
- *  else half duplex at fitProfile(want, …, half). */
-CallFit fitCall(uint8_t want, uint32_t hopBps, bool fullOk);
+/** What a call in `mode` wanting profile `want` runs at over a first hop of
+ *  hopBps: fitProfile(want, hopBps, mode) in that same mode. A call never
+ *  changes mode for its hop. */
+CallFit fitCall(uint8_t want, uint32_t hopBps, uint8_t mode);
 /** Seconds of talk at the profile's rate left in an hourly airtime budget of
  *  limitMs less AIRTIME_RESERVE_MS, of which usedMs is spent, the hop's
  *  airtime estimated as txBps / hopBps. -1 with no budget (limitMs 0) or an
@@ -163,8 +163,8 @@ int64_t talkSecondsLeft(const ProfileInfo& p, uint32_t hopBps,
 
 /** The profile `auto` picks for a link: Codec2 700C past 4 s round trip,
  *  Codec2 3200 past 1.5 s, else Opus medium — then fitCall for the first
- *  hop's hopBps, full duplex allowed. */
-CallFit autoProfile(uint32_t hopBps, int rtt_ms);
+ *  hop's hopBps in `mode`. */
+CallFit autoProfile(uint32_t hopBps, int rtt_ms, uint8_t mode = MODE_FULL_DUPLEX);
 
 /** Receive buffering for a profile: playback starts at frame_ms ×
  *  max(1, buffer − 2), never under JITTER_FLOOR_MS; the buffer holds

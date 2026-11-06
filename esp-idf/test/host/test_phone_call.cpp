@@ -312,74 +312,188 @@ static void noUll()
     EXPECT(o, "P80.1 S17f");
 }
 
-/* setProfile: the first hop moves the call's profile and mode; the peer
- * hears what changed in one packet, a ringing callee after ESTABLISHED. */
+/* setProfile: the first hop moves the call's profile; the peer hears what
+ * changed in one packet, a ringing callee after ESTABLISHED. */
 static void hopFit()
 {
     const uint8_t F = MODE_FULL_DUPLEX, H = MODE_HALF_DUPLEX;
 
-    Call o;                            /* caller: half duplex before RINGING */
+    Call o;                            /* caller: a step-down before RINGING */
     o.dial(0);
     o.linkActive(10, 10000);
     sigs(o, { ST_AVAILABLE }, 20);
     acts(o);
-    o.setProfile(0x10, H);
+    o.setProfile(0x10, F);
     EXPECT(o, "");                     /* nothing to tell yet */
-    CHECK(o.hopHalf && o.fullOk());
     sigs(o, { ST_RINGING }, 30);
-    EXPECT(o, "O10.2 T2 S10f,f2");     /* 0xF2 in the RINGING reply */
+    EXPECT(o, "O10.1 T2 S10f,f1");     /* in the RINGING reply */
     sigs(o, { ST_CONNECTING }, 40);
     sigs(o, { ST_ESTABLISHED }, 50);
     acts(o);
-    o.setProfile(0x10, F);             /* the hop carries full duplex again */
-    EXPECT(o, "P10.1 Sf1");
-    CHECK(!o.hopHalf && o.mode == F);
-    o.setProfile(0x10, F);             /* no change: nothing */
+    o.setProfile(0x30, F);             /* the hop carries more again */
+    EXPECT(o, "P30.1 S12f");
+    o.setProfile(0x30, F);             /* no change: nothing */
     EXPECT(o, "");
     o.setProfile(0x20, H);             /* both change: one packet */
     EXPECT(o, "P20.2 S11f,f2");
-    CHECK(o.hopHalf);
-    o.setProfile(0x10, H);             /* profile only */
-    EXPECT(o, "P10.2 S10f");
-    CHECK(o.hopHalf);
-    /* the peer prefers a mode itself: no longer half for the hop */
+    /* the peer prefers a mode itself: followed */
     sigs(o, { 0xF0 + F }, 60);
-    EXPECT(o, "P10.1");
-    CHECK(!o.hopHalf && o.fullOk());
+    EXPECT(o, "P20.1");
     sigs(o, { 0xF0 + H }, 70);
-    EXPECT(o, "P10.2");
-    CHECK(!o.hopHalf && !o.fullOk());  /* the peer chose half duplex */
+    EXPECT(o, "P20.2");
 
     Call e;                            /* callee: owed until ESTABLISHED */
     e.ring(0);
     acts(e);
     sigs(e, { 0xFF + 0x40, 0xF0 + F }, 100);
     acts(e);
-    e.setProfile(0x10, H);
-    EXPECT(e, "P10.2");
+    e.setProfile(0x10, F);
+    EXPECT(e, "P10.1");
     CHECK(e.answer(1000));
-    EXPECT(e, "S5 T0 L S6 S10f,f2");
-    CHECK(e.mode == H && e.hopHalf);
+    EXPECT(e, "S5 T0 L S6 S10f");
 
-    Call m;                            /* callee: only the mode owed */
-    m.ring(0);
-    sigs(m, { 0xFF + 0x10, 0xF0 + F }, 100);
-    acts(m);
-    m.setProfile(0x10, H);
-    CHECK(m.answer(1000));
-    EXPECT(m, "P10.2 S5 T0 L S6 Sf2");
-
-    Call d;                            /* the caller asked half duplex itself */
-    d.ring(0);
-    sigs(d, { 0xFF + 0x10, 0xF0 + H }, 100);
-    CHECK(d.mode == H && !d.hopHalf && !d.fullOk());
-
-    Call f;                            /* nothing fits: fail ends the call */
+    Call f;                            /* fail ends the call */
     f.ring(0);
     acts(f);
     CHECK(f.fail(100));
     EXPECT(f, "S0 X1000 C E:failed");
     CHECK(!f.fail(200));
+}
+
+/* Call::hop, the first hop's decision table. A fast hop is 1 Mbit/s, a
+ * "half" hop 4000 bit/s (no profile both ways in 60 %, 700C one way), a
+ * "none" hop 2000 bit/s (not even 700C one way). */
+static void hopTable()
+{
+    const uint8_t F = MODE_FULL_DUPLEX, H = MODE_HALF_DUPLEX;
+    const uint32_t FAST = 1000000, HALF = 4000, NONE = 2000;
+    CallFit f;
+
+    /* outgoing, full duplex, fast hop: full duplex, the profile it wants */
+    Call a;
+    a.dial(0);
+    a.linkActive(10, 10000);
+    CHECK(a.hop(0x40, FAST, f) == Call::HOP_FITS && f.profile == 0x40 && f.mode == F);
+    CHECK(a.hop(0x40, 0, f) == Call::HOP_FITS && f.profile == 0x40 && f.mode == F);   /* unknown hop */
+    CHECK(a.hop(0x40, 30000, f) == Call::HOP_FITS && f.profile == 0x30 && f.mode == F); /* step-down */
+
+    /* outgoing, full duplex, hop fits only half: refused as the link comes
+     * up, before it identifies (so the callee never rings) */
+    Call b;
+    b.dial(0);
+    b.linkActive(10, 10000);
+    CHECK(b.hop(0x40, HALF, f) == Call::HOP_FULL_SLOW);
+    CHECK(b.fail(10));
+    EXPECT(b, "X0 E:failed");
+    CHECK(b.ph == PH_NONE && !b.identifySent);
+
+    /* outgoing push to talk, fast hop: half duplex, 0xF2 in the RINGING reply */
+    Call c;
+    c.dial(0, true);
+    CHECK(c.ptt && c.mode == H);
+    c.linkActive(10, 10000);
+    CHECK(c.hop(0x40, FAST, f) == Call::HOP_FITS && f.profile == 0x40 && f.mode == H);
+    sigs(c, { ST_AVAILABLE }, 20);
+    EXPECT(c, "I");
+    sigs(c, { ST_RINGING }, 30);
+    EXPECT(c, "O40.2 T2 S13f,f2");
+    sigs(c, { ST_CONNECTING }, 40);
+    sigs(c, { ST_ESTABLISHED }, 50);
+    acts(c);
+    sigs(c, { 0xF0 + F }, 60);         /* the peer's FULL is not followed */
+    EXPECT(c, "");
+    CHECK(c.mode == H);
+    /* live push-to-talk call, the route degrades: stays half duplex */
+    CHECK(c.hop(0x40, HALF, f) == Call::HOP_FITS && f.profile == 0x10 && f.mode == H);
+    c.setProfile(f.profile, f.mode);
+    EXPECT(c, "P10.2 S10f");
+    /* … and ends when nothing fits even one way */
+    CHECK(c.hop(0x10, NONE, f) == Call::HOP_SLOW);
+
+    /* outgoing push to talk on a half hop: half duplex at 700C */
+    Call d;
+    d.dial(0, true);
+    d.linkActive(10, 10000);
+    CHECK(d.hop(0x40, HALF, f) == Call::HOP_FITS && f.profile == 0x10 && f.mode == H);
+
+    /* incoming, full duplex, half hop: waits for the caller's preferences
+     * (they follow RINGING), then refused with BUSY while ringing */
+    Call e;
+    e.ring(0);
+    acts(e);
+    CHECK(e.hop(0x40, HALF, f) == Call::HOP_WAIT);
+    sigs(e, { 0xFF + 0x40, 0xF0 + F }, 100);
+    acts(e);
+    CHECK(e.hop(0x40, HALF, f) == Call::HOP_FULL_SLOW);
+    CHECK(e.fail(100));
+    EXPECT(e, "S0 X1000 C E:failed");
+
+    /* incoming, the caller prefers half duplex, half hop: let in, half */
+    Call g;
+    g.ring(0);
+    acts(g);
+    CHECK(g.hop(0x40, HALF, f) == Call::HOP_WAIT);
+    sigs(g, { 0xFF + 0x40, 0xF0 + H }, 100);
+    EXPECT(g, "P40.2");
+    CHECK(g.mode == H && !g.ptt);
+    CHECK(g.hop(0x40, HALF, f) == Call::HOP_FITS && f.profile == 0x10 && f.mode == H);
+    g.setProfile(f.profile, f.mode);
+    EXPECT(g, "P10.2");
+    CHECK(g.answer(1000));
+    EXPECT(g, "S5 T0 L S6 S10f");
+    /* live, half duplex at the peer's asking, the route degrades further:
+     * stays half until nothing fits one way */
+    CHECK(g.hop(0x10, 3900, f) == Call::HOP_FITS && f.mode == H);
+    CHECK(g.hop(0x10, NONE, f) == Call::HOP_SLOW);
+    /* the peer switches back to full duplex: refused on this hop */
+    sigs(g, { 0xF0 + F }, 2000);
+    EXPECT(g, "P10.1");
+    CHECK(g.hop(0x10, HALF, f) == Call::HOP_FULL_SLOW);
+
+    /* incoming on a fast hop: full duplex, no wait */
+    Call h;
+    h.ring(0);
+    acts(h);
+    CHECK(h.hop(0x40, FAST, f) == Call::HOP_FITS && f.mode == F);
+
+    /* incoming, nothing fits one way: refused at once, no wait */
+    Call i;
+    i.ring(0);
+    acts(i);
+    CHECK(i.hop(0x40, NONE, f) == Call::HOP_SLOW);
+
+    /* outgoing, nothing fits one way: refused (full duplex or push to talk) */
+    Call j;
+    j.dial(0);
+    j.linkActive(10, 10000);
+    CHECK(j.hop(0x40, NONE, f) == Call::HOP_SLOW);
+    Call k;
+    k.dial(0, true);
+    k.linkActive(10, 10000);
+    CHECK(k.hop(0x40, NONE, f) == Call::HOP_SLOW);
+
+    /* live full-duplex call, the route degrades: ends */
+    Call l;
+    l.dial(0);
+    l.linkActive(10, 10000);
+    sigs(l, { ST_AVAILABLE }, 20);
+    sigs(l, { ST_RINGING }, 30);
+    sigs(l, { ST_CONNECTING }, 40);
+    sigs(l, { ST_ESTABLISHED }, 50);
+    acts(l);
+    CHECK(l.ph == PH_LIVE);
+    CHECK(l.hop(0x40, 30000, f) == Call::HOP_FITS && f.profile == 0x30 && f.mode == F);
+    CHECK(l.hop(0x40, HALF, f) == Call::HOP_FULL_SLOW);
+    CHECK(l.fail(60));
+    EXPECT(l, "X0 C E:failed");
+
+    /* a callee answered before the caller's preferences: decides as live */
+    Call m;
+    m.ring(0);
+    acts(m);
+    CHECK(m.answer(100));
+    acts(m);
+    CHECK(m.hop(0x40, HALF, f) == Call::HOP_FULL_SLOW);
 }
 
 /* How long a call's link may hear nothing before a new call takes its place. */
@@ -398,6 +512,7 @@ int main()
 {
     deadBound();
     hopFit();
+    hopTable();
     noUll();
     callerHappy();
     callerBusy();

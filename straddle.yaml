@@ -43,6 +43,8 @@ settings:
       - caption: "Talk keys: the keyboard's Mic key, Space on the voice-room screen, or the talk button in the app."
       - integer: { label: "Voice gate", unit: "dBFS", key: "s.lxst.vox_db", min: -80, max: 0 }
       - caption: "Voice-activated transmit opens above this level."
+      - switch: { label: "Microphone level control", key: "s.lxst.agc" }
+      - caption: "Evens out this device's microphone: cuts rumble, brings quiet speech up and keeps loud speech from clipping. The voice gate hears the evened-out level. The app's microphone has its own."
       - integer: { label: "Receive buffer", unit: "ms", key: "s.lxst.jitter_ms", min: 20, max: 3000, step: 20 }
       - caption: "Audio held back before a speaker plays, in rooms that send every frame on its own. Push-to-talk rooms set their own."
   - at:

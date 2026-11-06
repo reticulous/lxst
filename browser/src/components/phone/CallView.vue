@@ -1,6 +1,7 @@
 <!-- A call in progress: who, the phone's status line, and the buttons for
      where the call is. Ringing: Answer and Reject. Dialling or ringing out:
-     Cancel. Live: the timer, profile and mode, Mute and Hang up, and in half
+     Cancel. Ended after an outgoing call the route carried only half duplex
+     for: "Call as push-to-talk". Live: the timer, profile and mode, Mute and Hang up, and in half
      duplex a hold-to-talk button (held from pointer down until up, leave or
      cancel; Space does the same in the window). Under it, where the call's
      audio is, with "Take audio here" when it is on the device. -->
@@ -38,6 +39,11 @@
       <template v-else-if="active">
         <button class="rb rej" title="Cancel" @click="emit('hangup')">
           <q-icon :name="matCallEnd" size="22px" /><span>Cancel</span>
+        </button>
+      </template>
+      <template v-else-if="call.state === 'ended' && call.pttRedial && call.dir === 'out'">
+        <button class="redial" title="Call again as push to talk (half duplex)" @click="emit('redialPtt')">
+          <q-icon :name="matMic" size="18px" /><span>Call as push-to-talk</span>
         </button>
       </template>
     </div>
@@ -81,6 +87,7 @@ const emit = defineEmits<{
   ptt: [on: boolean]
   take: []
   resume: []
+  redialPtt: []
 }>()
 
 const active = computed(() => ['dialling', 'ringback', 'connecting'].includes(props.call.state))
@@ -121,6 +128,10 @@ onBeforeUnmount(up)
 .rb.rej { background: #b03a37; }
 .rb.rej:hover { background: #c94643; }
 .rb.mute { background: #2a2a2a; border: 1px solid #444; color: #cfcfcf; }
+.redial { display: inline-flex; align-items: center; gap: 6px; height: 42px; padding: 0 18px; border-radius: 21px;
+          border: none; background: #2f8a4a; color: #fff; font-weight: 700; font-size: calc(13px * var(--rfs, 1));
+          cursor: pointer; }
+.redial:hover { background: #37a057; }
 .rb.mute.on { background: #4a2626; border-color: #8a4545; color: #f0a0a0; }
 .ptt { position: relative; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
        width: 220px; max-width: 100%; height: 42px; border-radius: 21px; border: 2px solid #2c6bed;

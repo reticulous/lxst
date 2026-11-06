@@ -122,11 +122,14 @@ static void signalsAndProfiles()
     CHECK(is(autoProfile(0, 1500), 0x40, F));
     CHECK(is(autoProfile(0, 4001), 0x10, F));
     /* LoRa SF7/125 kHz registers 4000 bit/s: no full-duplex call fits its
-     * 60 %, one direction of 700C does: half duplex */
-    CHECK(is(autoProfile(4000, 200), 0x10, H));
-    CHECK(is(autoProfile(4000, 4001), 0x10, H));
+     * 60 %, one direction of 700C does: only a half-duplex call */
+    CHECK(is(autoProfile(4000, 200), 0, 0));
+    CHECK(is(autoProfile(4000, 200, H), 0x10, H));
+    CHECK(is(autoProfile(4000, 4001, H), 0x10, H));
+    CHECK(is(autoProfile(0, 200, H), 0x40, H));
     /* SF8 (2000 bit/s registered): nothing fits */
     CHECK(is(autoProfile(2000, 200), 0, 0));
+    CHECK(is(autoProfile(2000, 200, H), 0, 0));
     /* 30 kbit/s: Opus medium both ways needs 39200 > 18000, Codec2 3200
      * both ways 13040 fits */
     CHECK(is(autoProfile(30000, 200), 0x30, F));
@@ -182,15 +185,16 @@ static void hopCost()
     CHECK(fitProfile(0x70, 1000000, F) == 0x80);          /* never runs 0x70 */
     CHECK(fitProfile(0x10, 3000, H) == 0);
 
-    /* fitCall: full duplex first, half duplex where only one way fits, and
-     * no full duplex unless allowed */
+    /* fitCall: the call's own mode, never another */
     auto is = [](CallFit f, uint8_t p, uint8_t m) { return f.profile == p && f.mode == m; };
-    CHECK(is(fitCall(0x40, 0, true), 0x40, F));
-    CHECK(is(fitCall(0x40, 4000, true), 0x10, H));
-    CHECK(is(fitCall(0x30, 8000, true), 0x10, F));
-    CHECK(is(fitCall(0x30, 8000, false), 0x20, H));       /* 3675 <= 4800 */
-    CHECK(is(fitCall(0x10, 3000, true), 0, 0));
-    CHECK(is(fitCall(0x40, 100000, false), 0x40, H));
+    CHECK(is(fitCall(0x40, 0, F), 0x40, F));
+    CHECK(is(fitCall(0x40, 4000, F), 0, 0));              /* only half duplex fits */
+    CHECK(is(fitCall(0x40, 4000, H), 0x10, H));
+    CHECK(is(fitCall(0x30, 8000, F), 0x10, F));
+    CHECK(is(fitCall(0x30, 8000, H), 0x20, H));           /* 3675 <= 4800 */
+    CHECK(is(fitCall(0x10, 3000, F), 0, 0));
+    CHECK(is(fitCall(0x10, 3000, H), 0, 0));
+    CHECK(is(fitCall(0x40, 100000, H), 0x40, H));
 
     /* hourly budget: 360 s/h less the 15 s reserve at 700C over 4000 bit/s,
      * 57.5 % airtime */

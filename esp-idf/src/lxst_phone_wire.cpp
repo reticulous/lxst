@@ -387,15 +387,11 @@ uint8_t fitProfile(uint8_t want, uint32_t hopBps, uint8_t mode)
     return best ? best->id : 0;
 }
 
-CallFit fitCall(uint8_t want, uint32_t hopBps, bool fullOk)
+CallFit fitCall(uint8_t want, uint32_t hopBps, uint8_t mode)
 {
     CallFit f;
-    if (fullOk && (f.profile = fitProfile(want, hopBps, MODE_FULL_DUPLEX))) {
-        f.mode = MODE_FULL_DUPLEX;
-        return f;
-    }
-    f.profile = fitProfile(want, hopBps, MODE_HALF_DUPLEX);
-    f.mode = f.profile ? MODE_HALF_DUPLEX : 0;
+    f.profile = fitProfile(want, hopBps, mode);
+    f.mode = f.profile ? mode : 0;
     return f;
 }
 
@@ -411,10 +407,10 @@ int64_t talkSecondsLeft(const ProfileInfo& p, uint32_t hopBps,
     return (int64_t)((limitMs - spent) * hopBps / bps / 1000);
 }
 
-CallFit autoProfile(uint32_t hopBps, int rtt_ms)
+CallFit autoProfile(uint32_t hopBps, int rtt_ms, uint8_t mode)
 {
     uint8_t want = rtt_ms > 4000 ? 0x10 : rtt_ms > 1500 ? 0x30 : DEFAULT_PROFILE;
-    return fitCall(want, hopBps, true);
+    return fitCall(want, hopBps, mode);
 }
 
 void receiveBuffer(const ProfileInfo& p, uint16_t& jitter_ms, uint16_t& max_jitter_ms, bool batchedHop)

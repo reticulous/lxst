@@ -4,11 +4,11 @@
  * The node is the phone; this window is a view over its storage and a writer
  * of its one command key (the contract is lxst_phone.h):
  *
- *   lxst.phone.{state,dir,peer,peer_dest,peer_name,status,timer,muted,profile,mode}
+ *   lxst.phone.{state,dir,peer,peer_dest,peer_name,status,timer,muted,profile,mode,ptt_redial}
  *   lxst.phone.{dest,ident}              our number
  *   lxst.phone.peers.<dest>.{ident,name,hops,heard}
  *   s.lxst.phone.log.<n>.{dir,peer,name,at,dur,result}
- *   lxst.phone.cmd ("call <hash>", answer, reject, hangup, "mute 1|0"), .error
+ *   lxst.phone.cmd ("call <hash>", "call <hash> ptt", answer, reject, hangup, "mute 1|0"), .error
  *   s.lxmf.id.<n>.contacts.<peer>.*, lxmf.id.<n>.dest_hash   LXMF contacts
  *
  * The firmware publishes finished strings; this module passes them through
@@ -60,6 +60,9 @@ export interface PhoneCall {
   muted: boolean
   profile: string
   mode: string
+  /** Ended: the route carried only half duplex for this outgoing call, so a
+   *  push-to-talk call to the same peer would fit. */
+  pttRedial: boolean
 }
 
 export interface PhoneSelf { dest: string; ident: string }
@@ -114,9 +117,9 @@ export interface UsePhone {
   /** The talk key as this window holds it. */
   pttHeld: ComputedRef<boolean>
 
-  /** Call from the click: starts audio here, then dials. False for a hash
-   *  that is not one. */
-  dial: (hash: string) => boolean
+  /** Call from the click: starts audio here, then dials, as push to talk
+   *  (half duplex throughout) when ptt. False for a hash that is not one. */
+  dial: (hash: string, ptt?: boolean) => boolean
   /** Call from the click: starts audio here, then answers. */
   answer: () => void
   reject: () => void
@@ -190,6 +193,7 @@ function build(): UsePhone {
     muted: num(device.get('lxst.phone.muted')) === 1,
     profile: str(device.get('lxst.phone.profile')),
     mode: str(device.get('lxst.phone.mode')),
+    pttRedial: num(device.get('lxst.phone.ptt_redial')) === 1,
   }))
 
   const self = computed<PhoneSelf>(() => ({
@@ -281,11 +285,11 @@ function build(): UsePhone {
   /* A refused call never comes up. */
   watch(cmdError, (e) => { if (e && hold === 'pending' && !inCall.value) releaseAudio() })
 
-  const dial = (hash: string) => {
+  const dial = (hash: string, ptt = false) => {
     const h = normaliseHash(hash)
     if (!h) return false
     holdAudio()
-    cmd(`call ${h}`)
+    cmd(ptt ? `call ${h} ptt` : `call ${h}`)
     return true
   }
   const answer = () => { holdAudio(); cmd('answer') }
