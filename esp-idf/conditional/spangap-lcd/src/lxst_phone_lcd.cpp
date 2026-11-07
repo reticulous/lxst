@@ -16,16 +16,20 @@
  *   - Call: one screen that follows lxst.phone.state. Ringing: the caller,
  *     a pulsing handset, Reject and Answer. Dialling, ring-back, connecting:
  *     the status line and Cancel. Live: the peer, the timer, the profile and
- *     mode, Mute and Hang up, and in half duplex a hold-to-talk bar that
- *     shows the microphone level (lxstMicLevel()) along its foot while
- *     talking and writes lxst.cmd.ptt 1/0 (the board's talk key works everywhere; Space
- *     is claimed here while no text field has focus). Ended: the status for
+ *     mode, Mute and Hang up, and in half duplex a tall hold-to-talk bar
+ *     across the top, under the header and away from Hang up, that shows
+ *     the microphone level (lxstMicLevel()) along its foot while talking
+ *     and writes lxst.cmd.ptt 1/0 (the board's talk key works everywhere;
+ *     Space is claimed here while no text field has focus). Ended: the status for
  *     as long as the phone stays ended, then home; after an outgoing call
  *     the route carried only half duplex for (lxst.phone.ptt_redial), "Call
  *     as push-to-talk" with the focus, so Enter redials the peer that way.
  *
  * An incoming call raises the app over whatever is on the screen
- * (lcdShowProgram), waking the screen and closing any dialog first. On the
+ * (lcdShowProgram), waking the screen and closing any dialog first. While a
+ * call rings, is being set up or is live the screen is held awake
+ * (lcdHoldAwake): no inactivity timeout, though it can still be put to sleep
+ * by hand. On the
  * ringing screen Answer has the focus, so Enter answers; Backspace (and Esc
  * where the keyboard sends one) rejects. Back leaves the call screen for home
  * without touching the call.
@@ -259,7 +263,7 @@ void phoneCmd(const std::string& cmd, bool claim) {
 /* ---- model (lcd task only) ---- */
 
 struct Peer { std::string dest, ident, name; int hops = 0; long heard = 0; };
-struct LogRec { long n = 0, at = 0; std::string dir, peer, name, dur, result; };
+struct LogRec { long n = 0, at = 0; std::string dir, peer, lxmf, name, dur, result; };
 struct Contact { std::string hash, name; };
 
 std::map<std::string, Peer>   g_peers;
@@ -300,6 +304,7 @@ void logLeaf(const char* key, const char* val) {
     std::string v = val ? val : "";
     if      (!strcmp(f, "dir"))    r.dir = v;
     else if (!strcmp(f, "peer"))   r.peer = lower(v);
+    else if (!strcmp(f, "lxmf"))   r.lxmf = lower(v);
     else if (!strcmp(f, "name"))   r.name = v;
     else if (!strcmp(f, "at"))     r.at = atol(v.c_str());
     else if (!strcmp(f, "dur"))    r.dur = v;
@@ -361,6 +366,18 @@ void loadContacts() {
         out[h] = cc;
     }
     g_contacts.swap(out);
+}
+
+/* A log row's name, as known now: the LXMF contact's, else a heard phone's
+ * of that identity, else the one the call was logged with. */
+std::string logName(const LogRec& r) {
+    for (const std::string& h : { r.lxmf, r.peer }) {
+        auto c = g_contacts.find(h);
+        if (c != g_contacts.end() && !printable(c->second.name).empty()) return printable(c->second.name);
+    }
+    for (auto& [d, p] : g_peers)
+        if (p.ident == r.peer && !printable(p.name).empty()) return printable(p.name);
+    return printable(r.name);
 }
 
 /* The name to show for the call's peer: the phone's, else a heard peer's. */
@@ -902,8 +919,10 @@ void rebuildRows() {
         s.kind = RK_CALL;
         s.key = "l." + std::to_string(r.n);
         s.target = r.peer;
-        std::string name = printable(r.name);
-        s.title = name.empty() ? hashHead(r.peer) : name;
+        /* Unnamed, the row shows the LXMF address: the one the contacts
+         * list and the messages show for the same person. */
+        std::string name = logName(r);
+        s.title = name.empty() ? hashHead(r.lxmf.empty() ? r.peer : r.lxmf) : name;
         if (name.empty()) s.color = C_ACT;
         s.right = whenText(r.at);
         s.sub = (r.dir == "in" ? "Incoming" : "Outgoing") + std::string(DOT) + r.result;
@@ -1144,8 +1163,10 @@ void refreshTalk() {
         g_canTalk = true;
     } else {
         bool mic = lcdKeyDeclared(LCD_KEY_PTT), space = lcdKeyDeclared(LCD_KEY_SPACE);
-        text = mic && space ? "Hold Mic, Space or here to talk" : mic ? "Hold Mic or here to talk"
-             : space ? "Hold Space or here to talk" : "Hold here to talk";
+        const std::string ptt = lcdKeyLabel(LCD_KEY_PTT), spc = lcdKeyLabel(LCD_KEY_SPACE);
+        text = mic && space ? "Hold " + ptt + ", " + spc + " or here to talk"
+             : mic ? "Hold " + ptt + " or here to talk"
+             : space ? "Hold " + spc + " or here to talk" : "Hold here to talk";
         fg = C_ACT; border = C_ACCENT; bg = C_TALKRDY;
         g_canTalk = true;
     }
@@ -1270,23 +1291,14 @@ void buildCall() {
     s_call = mkScreen();
     g_callHdr = mkHeader(s_call, [](lv_event_t*) { goHome(); });
 
-    lv_obj_t* body = mkBody(s_call);
-    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(body, lcdPx(3), 0);
-    s_cIcon = mkIcon(body, IC_CALL, bigIconPx(), 0xFFFFFF);
-    s_cName = mkCentre(body, 0xFFFFFF, kBig);
-    s_cHash = mkCentre(body, C_SUB, kSmall);
-    s_cStatus = mkCentre(body, 0xFFFFFF, kFont);
-    s_cTimer = mkCentre(body, 0xFFFFFF, kTimer);
-    s_cProf = mkCentre(body, C_SUB, kSmall);
-
-    /* The hold-to-talk bar, for a half-duplex call. */
+    /* The hold-to-talk bar, for a half-duplex call: tall, full width and right
+     * under the header, as far from Hang up as the screen allows. */
     s_talkRow = mkRowBox(s_call, 0);
     lv_obj_set_style_pad_hor(s_talkRow, lcdPx(8), 0);
-    lv_obj_set_style_pad_bottom(s_talkRow, lcdPx(4), 0);
+    lv_obj_set_style_pad_top(s_talkRow, lcdPx(4), 0);
     s_talk = lv_button_create(s_talkRow);
     lv_obj_remove_style_all(s_talk);
-    lv_obj_set_height(s_talk, lcdPx(32));
+    lv_obj_set_height(s_talk, lcdPx(64));
     lv_obj_set_width(s_talk, 1);
     lv_obj_set_flex_grow(s_talk, 1);
     lv_obj_set_style_radius(s_talk, lcdPx(6), 0);
@@ -1313,6 +1325,16 @@ void buildCall() {
     lv_obj_add_event_cb(s_talk, onTalkEvent, LV_EVENT_RELEASED, nullptr);
     lv_obj_add_event_cb(s_talk, onTalkEvent, LV_EVENT_PRESS_LOST, nullptr);
     showIf(s_talkRow, false);
+
+    lv_obj_t* body = mkBody(s_call);
+    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(body, lcdPx(3), 0);
+    s_cIcon = mkIcon(body, IC_CALL, bigIconPx(), 0xFFFFFF);
+    s_cName = mkCentre(body, 0xFFFFFF, kBig);
+    s_cHash = mkCentre(body, C_SUB, kSmall);
+    s_cStatus = mkCentre(body, 0xFFFFFF, kFont);
+    s_cTimer = mkCentre(body, 0xFFFFFF, kTimer);
+    s_cProf = mkCentre(body, C_SUB, kSmall);
 
     lv_obj_t* bar = mkActionBar(s_call);
     s_bReject = mkButton(bar, "Reject", BTN_STOP, onReject, nullptr, IC_HANGUP);
@@ -1388,12 +1410,16 @@ void raiseForCall() {
     lcdShowProgram(APP_NAME);
 }
 
+/* The screen stays awake while a call rings, is set up or is live. */
+void holdForCall(const std::string& st) { lcdHoldAwake(APP_NAME, callActive(st)); }
+
 void onPhoneChange(const char* key, const char* val) {
     if (!key) return;
     if (!strcmp(key, "lxst.phone.state")) {
         std::string st = val ? val : "";
         bool rang = st == "ringing" && g_watchState != "ringing";
         g_watchState = st;
+        holdForCall(st);
         if (rang) {
             /* Already on the call screen in front: the refresh below does it. */
             if (!(s_layer && g_shown && g_screen == SC_CALL)) raiseForCall();
@@ -1513,6 +1539,7 @@ void LxstPhoneApp::appInit()
      * tests s_layer before touching a widget. */
     lcdRun([](void*) {
         g_watchState = phState();
+        holdForCall(g_watchState);
         storageSubscribeChanges("lxst.phone.",       onPhoneChange);
         storageSubscribeChanges("s.lxst.phone.enabled", onPhoneChange);
         storageSubscribeChanges("s.lxst.phone.log.", onLogChange);

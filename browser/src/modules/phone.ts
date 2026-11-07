@@ -7,7 +7,7 @@
  *   lxst.phone.{state,dir,peer,peer_dest,peer_name,status,timer,muted,profile,mode,ptt_redial}
  *   lxst.phone.{dest,ident}              our number
  *   lxst.phone.peers.<dest>.{ident,name,hops,heard}
- *   s.lxst.phone.log.<n>.{dir,peer,name,at,dur,result}
+ *   s.lxst.phone.log.<n>.{dir,peer,lxmf,name,at,dur,result}
  *   lxst.phone.cmd ("call <hash>", "call <hash> ptt", answer, reject, hangup, "mute 1|0"), .error
  *   s.lxmf.id.<n>.contacts.<peer>.*, lxmf.id.<n>.dest_hash   LXMF contacts
  *
@@ -18,7 +18,8 @@
  * the page's one audio surface (lxst's lib/lxstAudio.ts, shared with the
  * Partyline window) on the click, which opens "lxst:2" and takes the
  * endpoint, and then write the command. A call that is not ringing here over
- * that channel rings locally (lib/ringer.ts).
+ * that channel rings locally (lib/ringer.ts), and for a page not in front
+ * it is also a system notification (lib/callNotice.ts).
  */
 import { ref, computed, watch, effectScope, type ComputedRef } from 'vue'
 import { useDeviceStore } from 'spangap-browser/stores/device'
@@ -33,6 +34,7 @@ import {
   startAudio, resumeAudio, stopAudio, setTalkKey,
 } from '../lib/lxstAudio'
 import { startRing, stopRing } from '../lib/ringer'
+import { askCallNotices, showCallNotice, hideCallNotice } from '../lib/callNotice'
 
 /* This window's name on the page's one audio surface. */
 const AUDIO_USER = 'phone'
@@ -80,7 +82,12 @@ export interface PeerRow { hash: string; name: string; note: string }
 export interface PhoneLogEntry {
   n: number
   dir: string
+  /** What a call back dials: the identity hash, or what was dialled. */
   peer: string
+  /** The hash to show when there is no name: the LXMF address where known. */
+  shownHash: string
+  /** As known now: the LXMF contact's, else a heard phone's, else the one
+   *  the call was logged with; '' = none. */
   name: string
   /** Unix seconds, 0 = the clock was unset. */
   at: number
@@ -249,11 +256,19 @@ function build(): UsePhone {
    * stream and identity. */
   watch([phoneVisible, () => device.syncEpoch, lxmfSlots], ([v]) => { if (v) loadContacts() }, { immediate: true })
 
-  const log = computed<PhoneLogEntry[]>(() =>
-    entries(device.get('s.lxst.phone.log')).map(([k, r]) => ({
-      n: num(k), dir: str(r.dir), peer: str(r.peer).toLowerCase(), name: str(r.name),
-      at: num(r.at), dur: str(r.dur), result: str(r.result),
-    })).sort((a, b) => b.n - a.n))
+  const log = computed<PhoneLogEntry[]>(() => {
+    const byContact = new Map(contacts.value.filter(c => c.name).map(c => [c.hash, c.name]))
+    const byIdent = new Map(peers.value.filter(p => p.name && p.ident).map(p => [p.ident, p.name]))
+    return entries(device.get('s.lxst.phone.log')).map(([k, r]) => {
+      const peer = str(r.peer).toLowerCase()
+      const lxmf = str(r.lxmf).toLowerCase()
+      return {
+        n: num(k), dir: str(r.dir), peer, shownHash: lxmf || peer,
+        name: byContact.get(lxmf) || byContact.get(peer) || byIdent.get(peer) || str(r.name),
+        at: num(r.at), dur: str(r.dur), result: str(r.result),
+      }
+    }).sort((a, b) => b.n - a.n)
+  })
 
   const inCall = computed(() => ACTIVE.includes(call.value.state))
   const halfDuplex = computed(() => call.value.state === 'live' && call.value.mode === 'half duplex')
@@ -270,6 +285,7 @@ function build(): UsePhone {
    * the idle a click starts from does not. */
   let hold: '' | 'pending' | 'call' = ''
   const holdAudio = () => {
+    askCallNotices()
     startAudio(AUDIO_USER)
     hold = inCall.value ? 'call' : 'pending'
   }
@@ -334,8 +350,16 @@ function build(): UsePhone {
     && !(channelState.value === 'open' && audioOwner.value !== false && ctxState.value === 'running'))
   watch(ringHere, (r) => { if (r) startRing(); else stopRing() }, { immediate: true })
 
-  /* An incoming call brings the window forward. */
-  watch(() => call.value.state, (st, prev) => { if (st === 'ringing' && prev !== 'ringing') showPhone() })
+  /* An incoming call brings the window forward, and is a system notification
+   * for a page that is not in front. */
+  watch(() => call.value.state, (st, prev) => {
+    if (st === 'ringing' && prev !== 'ringing') {
+      showPhone()
+      showCallNotice(call.value.peerName || 'Unknown caller', showPhone)
+    } else if (st !== 'ringing') {
+      hideCallNotice()
+    }
+  })
 
   return {
     call, self, peers, contacts, log, inCall, halfDuplex, cmdError, audio, pttHeld,
@@ -355,7 +379,7 @@ export function registerPhone() {
 
   /* Dock app — foregrounds the Phone window. */
   registerApp({ id: 'phone', label: 'Phone', icon: 'phone', placement: 8,
-                open: showPhone, isOpen: () => phoneVisible.value })
+                open: () => { askCallNotices(); showPhone() }, isOpen: () => phoneVisible.value })
 
   registerWindowMount({ id: 'phone', title: 'Phone', component: PhoneWindow,
                         visible: phoneVisible, focusToken: phoneFocus })

@@ -291,8 +291,14 @@ which takes the endpoint) and then write the command. The Phone app on the
 device's LCD (liquid-crystal display) writes `lxst.cmd.claim` = `device`
 first, so the device's microphone and speaker take the call; it also rises
 over whatever is on the screen when a call comes in, where Enter answers and
-Backspace rejects. A browser window with no audio channel open rings locally
-as well, so an incoming call is never silent there. The browser's
+Backspace rejects, and holds the screen awake while the call rings, is set up
+or is live. A browser window with no audio channel open rings locally
+as well, and an incoming call raises its Phone window. A page that is not in
+front also gets a system notification, which the operating system sounds and
+which brings the tab forward when clicked: browsers hold back a page's own
+sound until it has been clicked since it loaded, and no page can raise its own
+tab. Permission for it is asked on the first opening of the Phone app or the
+first call from or answered in the browser. The browser's
 audio client, `browser/src/lib/lxstAudio.ts`, is this straddle's and is
 shared by the Phone and Partyline windows.
 
@@ -310,7 +316,7 @@ Persistent (`s.`):
 | `s.lxst.phone.allow` | `all` (default) · `contacts` · `none` |
 | `s.lxst.phone.blocked` | Space-separated 32-hex identity hashes that always hear BUSY. |
 | `s.lxst.phone.profile` | `auto` (default) · `ulbw` · `vlbw` · `lbw` · `mq` · `hq` · `shq` · `ll` (a stored `ull` reads as `ll`) |
-| `s.lxst.phone.log.<n>.{dir,peer,name,at,dur,result}` | The call log, newest = highest `n`. `dir` `in` · `out`; `peer` the identity hash; `at` Unix seconds (0 while the clock was unset); `dur` "m:ss" talked, "" if never connected; `result` `answered` · `missed` · `declined` (we rejected) · `rejected` (they did) · `busy` · `no answer` · `failed` · `cancelled`. |
+| `s.lxst.phone.log.<n>.{dir,peer,lxmf,name,at,dur,result}` | The call log, newest = highest `n`. `dir` `in` · `out`; `peer` the identity hash (what was dialled, for a call that ended before the identity was known); `lxmf` that identity's LXMF address, "" when unknown; `name` the name known when the call ended. Both apps show the LXMF contact's name first, then a heard phone's, then `name`, and with none of them the LXMF address (else `peer`); `at` Unix seconds (0 while the clock was unset); `dur` "m:ss" talked, "" if never connected; `result` `answered` · `missed` · `declined` (we rejected) · `rejected` (they did) · `busy` · `no answer` · `failed` · `cancelled`. |
 
 RAM:
 

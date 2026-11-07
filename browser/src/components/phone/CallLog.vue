@@ -1,13 +1,13 @@
-<!-- The call log, newest first: which way, who (name, else the hash), when,
+<!-- The call log, newest first: which way, who (name, else the LXMF address), when,
      how long and how it ended. A row calls that identity back. -->
 <template>
   <div class="cl">
     <div v-if="!entries.length" class="none">No calls yet.</div>
     <div v-for="e in entries" :key="e.n" class="row" :class="{ bad: bad(e) }"
-         :title="disabled ? '' : `Call ${e.name || e.peer} back`" @click="!disabled && e.peer && emit('call', e.peer)">
+         :title="disabled ? '' : `Call ${e.name || e.shownHash} back`" @click="!disabled && e.peer && emit('call', e.peer)">
       <q-icon :name="icon(e)" size="16px" class="ic" :class="e.dir" />
       <div class="mid">
-        <div class="nm" :class="{ anon: !e.name }">{{ e.name || groupHash(e.peer) }}</div>
+        <div class="nm" :class="{ anon: !e.name }">{{ e.name || groupHash(e.shownHash) }}</div>
         <div class="sub">{{ [e.result, e.dur].filter(Boolean).join(' · ') }}</div>
       </div>
       <div class="at">{{ callTime(e.at) }}</div>

@@ -35,9 +35,13 @@
  *                           ull · ll. auto: Codec2 700C when the link's first hop
  *                           is LoRa or its round trip passes 4 s, Codec2 3200
  *                           past 1.5 s, else Opus medium. A callee takes the caller's.
- *   s.lxst.phone.log.<n>.{dir,peer,name,at,dur,result}
+ *   s.lxst.phone.log.<n>.{dir,peer,lxmf,name,at,dur,result}
  *                           the 30 newest calls, newest = highest n. dir in · out;
- *                           peer the identity hash; at Unix seconds (0: clock
+ *                           peer the identity hash (what was dialled, for a call
+ *                           that ended before the identity was known); lxmf its
+ *                           LXMF address ("" unknown); name as known when the
+ *                           call ended — a view shows the contact's or a heard
+ *                           phone's name over it; at Unix seconds (0: clock
  *                           unset); dur "m:ss" talked ("" never connected); result
  *                           answered · missed · declined · rejected · busy ·
  *                           no answer · failed · cancelled

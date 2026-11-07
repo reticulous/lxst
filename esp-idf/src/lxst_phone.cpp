@@ -605,14 +605,18 @@ static void logBoot()
         if (n < s_logNext - PH_LOG_KEEP) storageDeleteTree(("s.lxst.phone.log." + std::to_string(n)).c_str());
 }
 
-static void logEntry(Dir dir, const std::string& peer, const std::string& name, uint32_t at,
-                     const std::string& dur, Result r)
+/** One log record. `peer` is the identity hash, or what was dialled when the
+ *  call ended before the identity was known; `lxmf` is that identity's LXMF
+ *  address, "" when not known. */
+static void logEntry(Dir dir, const std::string& peer, const std::string& lxmf, const std::string& name,
+                     uint32_t at, const std::string& dur, Result r)
 {
     int n = s_logNext++;
     std::string b = "s.lxst.phone.log." + std::to_string(n) + ".";
     storageBegin();
     storageSet((b + "dir").c_str(), dir == DIR_IN ? "in" : "out");
     storageSet((b + "peer").c_str(), peer.c_str());
+    storageSet((b + "lxmf").c_str(), lxmf.c_str());
     storageSet((b + "name").c_str(), name.c_str());
     storageSet((b + "at").c_str(), (int)at);
     storageSet((b + "dur").c_str(), dur.c_str());
@@ -625,7 +629,15 @@ static void logCall(Result r, int64_t now)
 {
     std::string peer = !s_ctx->peerIdent.empty() ? s_ctx->peerIdent : s_ctx->typed;
     std::string dur = s_call->liveAt >= 0 ? durationText((now - s_call->liveAt) / 1000) : "";
-    logEntry(s_call->dir, peer, s_ctx->peerName, s_ctx->at, dur, r);
+    /* The name as known now: an announce heard during the call counts. */
+    uint8_t ih[16];
+    std::string lxmf, name = s_ctx->peerName;
+    if (hexTo(s_ctx->peerIdent, ih, 16)) {
+        lxmf = lxmfDestOf(ih);
+        std::string fresh = nameFor(ih);
+        if (!fresh.empty()) name = fresh;
+    }
+    logEntry(s_call->dir, peer, lxmf, name, s_ctx->at, dur, r);
 }
 
 /* ─────────────── carrying out the call's actions ─────────────── */
@@ -931,7 +943,7 @@ static void pendingIdentified(int i, std::string identHex)
     if (s_call->ph != PH_NONE || !allowed) {
         info("lxphone: %s refused (%s)", identHex.c_str(), allowed ? "a call is up" : "not allowed");
         Result r = refusedResult(s_call->ph != PH_NONE, allowed);
-        if (r != R_NONE) logEntry(DIR_IN, identHex, nameFor(ih), wallS(), "", r);
+        if (r != R_NONE) logEntry(DIR_IN, identHex, lxmfDestOf(ih), nameFor(ih), wallS(), "", r);
         sendSignal(p.h, ST_BUSY);
         dyingAdd(p.h, -1, true, now + SIGNAL_GRACE_MS);
         return;
